@@ -1,0 +1,72 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@400;500;600;700&family=Space+Grotesk:wght@300;400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-display: "Outfit", "Space Grotesk", sans-serif;
+
+  --text-label: 10px;
+  --text-body-sm: 12px;
+  --text-body: 14px;
+  --text-subheading: 16px;
+  --text-heading: 20px;
+}
+
+@media (max-width: 640px) {
+  :root {
+    --text-label: 8px;
+    --text-body-sm: 9px;
+    --text-body: 10px;
+    --text-subheading: 12px;
+    --text-heading: 14px;
+  }
+}
+
+@layer base {
+  body {
+    @apply bg-[#020617] text-slate-200;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  /* Apply tabular-nums to all numeric values as requested */
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  .glass {
+    @apply bg-slate-900/50 backdrop-blur-md border border-slate-800;
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-[#020617];
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-slate-800 rounded-full hover:bg-slate-700;
+}
+
+/* Date Picker Styling */
+input[type="date"] {
+  color: #cbd5e1; /* slate-300 */
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.8) sepia(100%) saturate(0%) hue-rotate(180deg);
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator:hover {
+  opacity: 1;
+}

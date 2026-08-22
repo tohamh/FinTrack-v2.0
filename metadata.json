@@ -1,0 +1,8 @@
+{
+  "name": "FinTrack Pro v2.0 (Income \u0026 Expense)",
+  "description": "A modular, production-ready financial dashboard for tracking investments, income, and expenses with a focus on the Bangladesh market.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
