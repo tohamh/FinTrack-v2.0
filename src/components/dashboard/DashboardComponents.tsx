@@ -936,7 +936,7 @@ export const DashboardCharts: React.FC<{
           </div>
         </div>
 
-        <div ref={accountsContainerRef} className="w-full relative z-10" style={{ height: accountsChartHeight }}>
+                <div ref={accountsContainerRef} className="w-full relative z-10 flex-1 min-h-[300px]" style={{ minHeight: accountsChartHeight, height: '100%' }}>
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart 
               data={displayAccountsData} 
@@ -967,7 +967,7 @@ export const DashboardCharts: React.FC<{
                 tickLine={false}
                 axisLine={false}
                 dy={8}
-                padding={{ left: 0, right: 0 }}
+                padding={{ left: 16, right: 16 }}
                 className="font-bold uppercase tracking-widest"
                 tick={{ fill: '#94a3b8', fontSize: 11, fontWeight: 700, letterSpacing: '0.05em' }}
               />
@@ -1357,7 +1357,7 @@ export const DashboardCharts: React.FC<{
                 tickLine={false}
                 axisLine={false}
                 dy={8}
-                padding={{ left: 0, right: 0 }}
+                padding={{ left: 16, right: 16 }}
                 className="font-bold uppercase tracking-widest"
                 tick={{ fill: '#94a3b8', fontSize: 11, fontWeight: 700, letterSpacing: '0.05em' }}
               />
