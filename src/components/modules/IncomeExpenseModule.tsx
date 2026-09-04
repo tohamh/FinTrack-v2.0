@@ -5,21 +5,23 @@
 
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { 
-  PieChart as RechartsPieChart, Pie, Cell, ResponsiveContainer, Legend,
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ComposedChart, Line
+  ResponsiveContainer,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ComposedChart, Line, LabelList
 } from 'recharts';
 import { Card, Button, Modal, Input, Select, Checkbox } from '../ui/BaseComponents';
-import { BankAccount, IncomeExpenseTransaction, AppState, AppCategory } from '../../types';
-import { formatBDT, formatDate, cn } from '../../utils/formatters';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
+import { BankAccount, IncomeExpenseTransaction, AppState, AppCategory, FDRTransaction } from '../../types';
+import { formatBDT, formatDate, cn, formatCompactBDT } from '../../utils/formatters';
 import { pushToSheet, markDirty } from '../../utils/sheetSync';
 import { 
-  Wallet, TrendingUp, PieChart as PieIcon, Landmark, ArrowUpRight, ArrowDownRight, 
+  Wallet, TrendingUp, PieChart, Landmark, ArrowUpRight, ArrowDownRight, 
   Trash2, Edit2, Plus, Calendar, ChevronLeft, ChevronRight, ChevronDown, 
   SlidersHorizontal, Download, Upload, Info, Search, Filter, GripVertical,
   Tag, CreditCard, X, Check, ArrowLeftRight, HandCoins,
   History, Sparkles, CornerDownLeft, ShoppingBag, Utensils, Car, Home,
   Zap, GraduationCap, Gift, Receipt, Briefcase, HeartPulse,
-  Lightbulb, BookOpen
+  Lightbulb, BookOpen, BadgePercent, Wrench, Scale, BarChart2,
+  Settings, FileSpreadsheet
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
@@ -59,17 +61,59 @@ export const isFdrAccount = (acc?: BankAccount | null): boolean => {
   return name.includes('fdr') || name.includes('fixed deposit') || name.includes('fixed-deposit') || /\bfd\b/i.test(name);
 };
 
+export const isInvestmentAccount = (acc?: BankAccount | null, allAccounts: BankAccount[] = []): boolean => {
+  if (!acc) return false;
+  if (isBoAccount(acc) || isMutualFundAccount(acc) || isOnlineInvestmentAccount(acc) || isSukukAccount(acc) || isFdrAccount(acc)) return true;
+  const id = (acc.id || '').toLowerCase();
+  const parentId = (acc.parentId || '').toLowerCase();
+  const name = (acc.name || '').trim().toLowerCase();
+
+  if (acc.parentId && allAccounts.length > 0) {
+    const parent = allAccounts.find(a => a.id === acc.parentId);
+    if (parent) {
+      const pName = (parent.name || '').toLowerCase();
+      const pId = (parent.id || '').toLowerCase();
+      if (pName.includes('invest') || pId.includes('invest')) return true;
+    }
+  }
+
+  return (
+    id === 'bdt-investments' ||
+    parentId === 'bdt-investments' ||
+    id.includes('investment') ||
+    id.includes('bo-account') ||
+    id.includes('mutual-fund') ||
+    id.includes('sukuk') ||
+    id.includes('fdr') ||
+    id.includes('online-invest') ||
+    name === 'investments' ||
+    name.includes('investment') ||
+    name.includes('bo account') ||
+    name.includes('online investment') ||
+    name.includes('mutual fund') ||
+    name.includes('sukuk')
+  );
+};
+
 export async function syncDseDepositTransaction({
   id,
   date,
   amount,
   notes,
+  linkedIeGroupId,
+  transactionType = 'Deposit',
+  ticker = '',
+  companyName = '',
   isDelete = false
 }: {
   id: string;
   date: string;
   amount: number;
   notes: string;
+  linkedIeGroupId?: string;
+  transactionType?: 'Deposit' | 'Withdrawal' | 'Dividend' | 'Sell' | 'Buy' | 'Charge';
+  ticker?: string;
+  companyName?: string;
   isDelete?: boolean;
 }) {
   try {
@@ -95,18 +139,46 @@ export async function syncDseDepositTransaction({
       return;
     }
 
+    const existingItem = existingIndex >= 0 ? currentDse[existingIndex] : null;
+
+    const defaultNotes = transactionType === 'Withdrawal'
+      ? 'Transfer from BO Account'
+      : transactionType === 'Dividend'
+        ? 'Cash Dividend'
+        : transactionType === 'Sell'
+          ? 'Stocks P&L'
+          : transactionType === 'Charge'
+            ? 'BO Account Charge'
+            : 'Transfer to BO Account';
+
+    const qty = (existingItem?.qty !== undefined && existingItem?.qty > 0) ? existingItem.qty : 1;
+
+    let price: number;
+    if (existingItem?.type === 'Sell' || existingItem?.type === 'Buy') {
+      price = existingItem.price || amount;
+    } else if (existingItem && existingItem.price !== undefined && existingItem.price > 0 && Math.abs((existingItem.total ?? (existingItem.qty * existingItem.price)) - amount) < 0.001) {
+      price = existingItem.price;
+    } else if (existingItem && existingItem.price !== undefined && existingItem.price > 0 && existingItem.qty > 0) {
+      price = Number((amount / existingItem.qty).toFixed(2));
+    } else {
+      price = qty > 0 ? Number((amount / qty).toFixed(2)) : amount;
+    }
+
     const dseTx = {
       id,
       date,
-      type: 'Deposit',
-      portfolio: 'Investment',
-      ticker: '',
-      companyName: '',
-      qty: 1,
-      price: amount,
-      commission: 0,
-      total: amount,
-      notes: notes || 'Transfer to BO Account',
+      type: transactionType,
+      portfolio: existingItem?.portfolio || 'Investment',
+      ticker: ticker || existingItem?.ticker || '',
+      companyName: companyName || existingItem?.companyName || '',
+      qty,
+      price,
+      commission: existingItem?.commission || 0,
+      // For a Sell, "amount" arriving from Income & Expense is the realized P&L,
+      // not the sale proceeds — never let it overwrite the DSE transaction's real total.
+      total: (transactionType === 'Sell' && existingItem) ? existingItem.total : amount,
+      notes: notes || existingItem?.notes || defaultNotes,
+      linkedIeGroupId,
     };
 
     if (existingIndex >= 0) {
@@ -145,10 +217,9 @@ export function formatGroupDate(dateStr: string) {
   }
 }
 
-// ── Visual Category & Subcategory Icon Resolver ────────────────────────
-export function getCategoryVisual(category?: string, type?: string, subCategory?: string) {
+// ── Visual Category Icon Resolver (Strictly Category-Based Only) ──────────
+export function getCategoryVisual(category?: string, type?: string) {
   const cat = (category || '').trim().toLowerCase();
-  const sub = (subCategory || '').trim().toLowerCase();
 
   // Transfers
   if (type === 'Transfer' || cat.includes('transfer')) {
@@ -159,7 +230,7 @@ export function getCategoryVisual(category?: string, type?: string, subCategory?
   }
 
   // Loans
-  if (type === 'Loan' || cat.includes('loan')) {
+  if (type === 'Loan' || cat.includes('loan') || cat.includes('borrow') || cat.includes('lend')) {
     return {
       Icon: HandCoins,
       bg: 'bg-amber-500/20 text-amber-300 border-amber-500/30 ring-1 ring-amber-500/20'
@@ -167,63 +238,23 @@ export function getCategoryVisual(category?: string, type?: string, subCategory?
   }
 
   // Initial Balance
-  if (cat.includes('initial') || sub.includes('starting balance')) {
+  if (cat.includes('initial') || cat.includes('starting balance')) {
     return {
       Icon: Wallet,
       bg: 'bg-teal-500/20 text-teal-300 border-teal-500/30 ring-1 ring-teal-500/20'
     };
   }
 
-  // Accommodation (House / Rent / Housing)
-  if (cat.includes('accommodation') || cat.includes('rent') || cat.includes('housing') || sub.includes('rent') || sub.includes('housing')) {
+  // Other Income (Book Royalty, Podcast Royalty, Other Income) - Single distinct Sparkles badge
+  if (cat === 'other income' || cat.includes('other income') || cat.includes('royalty') || (type === 'Income' && cat.includes('other'))) {
     return {
-      Icon: Home,
-      bg: 'bg-blue-500/20 text-blue-300 border-blue-500/30 ring-1 ring-blue-500/20'
-    };
-  }
-
-  // Household & Utility (Electricity, Water, Gas, Internet, WiFi, Mobile Bill)
-  if (cat.includes('household') || cat.includes('utility') || cat.includes('electric') || sub.includes('electric') || sub.includes('gas') || sub.includes('water') || sub.includes('internet') || sub.includes('wifi') || sub.includes('mobile')) {
-    return {
-      Icon: Lightbulb,
-      bg: 'bg-yellow-500/20 text-yellow-300 border-yellow-500/30 ring-1 ring-yellow-500/20'
-    };
-  }
-
-  // Transportation & Travel (Fare, Fuel, Taxi, Uber, Flights, Bus, Trains)
-  if (cat.includes('transport') || cat.includes('travel') || sub.includes('fare') || sub.includes('fuel') || sub.includes('taxi') || sub.includes('car') || sub.includes('bus') || sub.includes('uber') || sub.includes('flight')) {
-    return {
-      Icon: Car,
-      bg: 'bg-orange-500/20 text-orange-300 border-orange-500/30 ring-1 ring-orange-500/20'
-    };
-  }
-
-  // Food, Clothing & Essentials (Groceries, Dining, Market, Kitchen)
-  if (cat.includes('food') || cat.includes('cloth') || cat.includes('grocer') || cat.includes('essential') || sub.includes('grocer') || sub.includes('food') || sub.includes('restaurant') || sub.includes('kitchen') || sub.includes('market')) {
-    return {
-      Icon: ShoppingBag,
-      bg: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30 ring-1 ring-emerald-500/20'
-    };
-  }
-
-  // Education (Tuition, Books, Courses, School, Exam)
-  if (cat.includes('education') || cat.includes('tuition') || sub.includes('book') || sub.includes('course') || sub.includes('school') || sub.includes('training') || sub.includes('exam')) {
-    return {
-      Icon: GraduationCap,
-      bg: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30 ring-1 ring-indigo-500/20'
-    };
-  }
-
-  // Festival, Events & Special (Ceremony, Gifts, Tour, Holiday, Philanthropy, Sadakah)
-  if (cat.includes('festival') || cat.includes('event') || cat.includes('special') || cat.includes('gift') || sub.includes('gift') || sub.includes('tour') || sub.includes('holiday') || sub.includes('philanthropy') || sub.includes('ceremony') || sub.includes('hospitality')) {
-    return {
-      Icon: Gift,
-      bg: 'bg-pink-500/20 text-pink-300 border-pink-500/30 ring-1 ring-pink-500/20'
+      Icon: Sparkles,
+      bg: 'bg-purple-500/20 text-purple-300 border-purple-500/30 ring-1 ring-purple-500/20'
     };
   }
 
   // Remittance Income (Salary, Incentive, Facebook Revenue, Freelance)
-  if (cat.includes('remittance') || cat.includes('salary') || cat.includes('revenue') || sub.includes('salary') || sub.includes('facebook') || sub.includes('youtube') || sub.includes('incentive') || sub.includes('freelance')) {
+  if (cat.includes('remittance') || cat.includes('salary') || cat.includes('revenue') || cat.includes('freelance')) {
     return {
       Icon: Briefcase,
       bg: 'bg-teal-500/20 text-teal-300 border-teal-500/30 ring-1 ring-teal-500/20'
@@ -231,34 +262,94 @@ export function getCategoryVisual(category?: string, type?: string, subCategory?
   }
 
   // Finance Income (FDR Interest, Provisional Profit, Dividend, Sukuk Rent, Investments)
-  if (cat.includes('finance') || cat.includes('dividend') || cat.includes('profit') || cat.includes('interest') || sub.includes('dividend') || sub.includes('fdr') || sub.includes('sukuk') || sub.includes('provisional')) {
+  if (cat.includes('finance') || cat.includes('dividend') || cat.includes('profit') || cat.includes('interest') || cat.includes('investment') || cat.includes('sukuk') || cat.includes('fdr')) {
     return {
       Icon: Landmark,
       bg: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30 ring-1 ring-cyan-500/20'
     };
   }
 
-  // Other Expense (Bank charges, TDS, maintenance fees)
-  if (cat.includes('expense') || sub.includes('charge') || sub.includes('fee') || sub.includes('tds') || sub.includes('tax') || sub.includes('service charge')) {
+  // Accommodation (House / Rent / Housing)
+  if (cat.includes('accommodation') || cat.includes('rent') || cat.includes('housing')) {
     return {
-      Icon: Receipt,
+      Icon: Home,
+      bg: 'bg-blue-500/20 text-blue-300 border-blue-500/30 ring-1 ring-blue-500/20'
+    };
+  }
+
+  // Household & Utility / House Repair
+  if (
+    cat.includes('household') || cat.includes('utility') || cat.includes('repair') || cat.includes('maintenance')
+  ) {
+    return {
+      Icon: Wrench,
+      bg: 'bg-yellow-500/20 text-yellow-300 border-yellow-500/30 ring-1 ring-yellow-500/20'
+    };
+  }
+
+  // Transportation (Vehicle, Fuel, Ride, Transport, Flight)
+  if (
+    cat.includes('transport') || cat.includes('travel') || cat.includes('fuel') || cat.includes('vehicle')
+  ) {
+    return {
+      Icon: Car,
+      bg: 'bg-orange-500/20 text-orange-300 border-orange-500/30 ring-1 ring-orange-500/20'
+    };
+  }
+
+  // Food, Clothing & Essentials (Groceries, Dining, Market, Kitchen, Clothes, Apparel, Essentials) - Single consistent ShoppingBag icon
+  if (
+    cat.includes('food') || cat.includes('cloth') || cat.includes('grocer') || cat.includes('essential') ||
+    cat.includes('dining') || cat.includes('restaurant') || cat.includes('bazaar') || cat.includes('bazar') || cat.includes('kitchen')
+  ) {
+    return {
+      Icon: ShoppingBag,
+      bg: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30 ring-1 ring-emerald-500/20'
+    };
+  }
+
+  // Education (Tuition, Courses, School, Exam)
+  if (cat.includes('education') || cat.includes('tuition') || cat.includes('school') || cat.includes('academic')) {
+    return {
+      Icon: GraduationCap,
+      bg: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30 ring-1 ring-indigo-500/20'
+    };
+  }
+
+  // Festival, Events & Special (Ceremony, Gifts, Tour, Holiday, Philanthropy, Sadakah)
+  if (cat.includes('festival') || cat.includes('event') || cat.includes('special') || cat.includes('gift') || cat.includes('tour') || cat.includes('holiday') || cat.includes('philanthropy') || cat.includes('sadakah') || cat.includes('zakat')) {
+    return {
+      Icon: Gift,
+      bg: 'bg-pink-500/20 text-pink-300 border-pink-500/30 ring-1 ring-pink-500/20'
+    };
+  }
+
+  // Health / Medical / Healthcare
+  if (cat.includes('health') || cat.includes('medical') || cat.includes('doctor') || cat.includes('hospital')) {
+    return {
+      Icon: HeartPulse,
+      bg: 'bg-red-500/20 text-red-300 border-red-500/30 ring-1 ring-red-500/20'
+    };
+  }
+
+  // Tax, Charges & TDS (TDS on Profit, Bank charges, Maintenance fees, Govt Tax, VAT, Service Fees)
+  if (
+    cat.includes('tax') || cat.includes('charge') || cat.includes('fee') || cat.includes('tds') ||
+    cat.includes('vat') || cat.includes('duty')
+  ) {
+    return {
+      Icon: Scale,
       bg: 'bg-rose-500/20 text-rose-300 border-rose-500/30 ring-1 ring-rose-500/20'
     };
   }
 
-  // Other Income (Book Royalty, Podcast Royalty, Other Income) - Single distinct Sparkles badge
-  if (cat.includes('other income') || cat.includes('royalty') || sub.includes('royalty') || cat.includes('income')) {
+  // Other Expense (Miscellaneous, General & Uncategorized Expenses)
+  if (
+    cat === 'other expense' || cat.includes('other expense') || (type === 'Expense' && cat.includes('other')) || cat.includes('misc') || cat.includes('expense')
+  ) {
     return {
-      Icon: Sparkles,
-      bg: 'bg-purple-500/20 text-purple-300 border-purple-500/30 ring-1 ring-purple-500/20'
-    };
-  }
-
-  // Health / Medical
-  if (cat.includes('health') || cat.includes('medical') || sub.includes('doctor') || sub.includes('medicine') || sub.includes('hospital')) {
-    return {
-      Icon: HeartPulse,
-      bg: 'bg-red-500/20 text-red-300 border-red-500/30 ring-1 ring-red-500/20'
+      Icon: Receipt,
+      bg: 'bg-fuchsia-500/20 text-fuchsia-300 border-fuchsia-500/30 ring-1 ring-fuchsia-500/20'
     };
   }
 
@@ -281,6 +372,106 @@ export function getCategoryVisual(category?: string, type?: string, subCategory?
     Icon: Tag,
     bg: 'bg-slate-800 text-slate-300 border-slate-700'
   };
+}
+
+// ── Account Icon & Color Resolver ───────────────────────────────────────
+export function getAccountVisual(acc?: BankAccount | { id?: string; name?: string; currency?: string; parentId?: string; isParent?: boolean } | null) {
+  if (!acc) {
+    return {
+      letter: '?',
+      badgeClass: 'bg-slate-800 text-slate-300 border-slate-700 ring-1 ring-slate-700/50'
+    };
+  }
+
+  const name = (acc.name || '').trim();
+  const match = name.match(/[a-zA-Z0-9]/);
+  const letter = (match ? match[0] : (name.charAt(0) || '?')).toUpperCase();
+  const id = (acc.id || '').toLowerCase();
+  const parentId = (acc.parentId || '').toLowerCase();
+  const currency = acc.currency || 'BDT';
+  const lowerName = name.toLowerCase();
+
+  // 1. Investment accounts -> Pinkish color
+  const isInvestment = id === 'bdt-investments' || parentId === 'bdt-investments' || 
+    id.includes('investment') || id.includes('bo-account') || id.includes('mutual-fund') || id.includes('sukuk') ||
+    lowerName === 'investments' || lowerName.includes('bo account') || lowerName.includes('online investment') || 
+    lowerName.includes('mutual fund') || lowerName.includes('sukuk');
+
+  if (isInvestment) {
+    return {
+      letter,
+      badgeClass: 'bg-pink-500/20 text-pink-300 border-pink-500/35 ring-1 ring-pink-500/20'
+    };
+  }
+
+  // 2. Wallet accounts -> Deep Earthy Coffee / Leather Brown (distinct from LYD)
+  const isWallet = id === 'bdt-wallets' || parentId === 'bdt-wallets' || 
+    id.includes('wallet') || id.includes('bkash') || id.includes('cellfin') || id.includes('mcash') ||
+    lowerName === 'wallets' || lowerName.includes('bkash') || lowerName.includes('cellfin') || 
+    lowerName.includes('mcash') || lowerName.includes('nagad') || lowerName.includes('rocket') || lowerName.includes('upay');
+
+  if (isWallet) {
+    return {
+      letter,
+      badgeClass: 'bg-[#3e2312]/90 text-[#fbd8b5] border-[#8b4f26] ring-1 ring-[#8b4f26]/30'
+    };
+  }
+
+  // 3. Currency based colors:
+  // USD -> Bluish
+  if (currency === 'USD') {
+    return {
+      letter,
+      badgeClass: 'bg-sky-500/20 text-sky-300 border-sky-500/35 ring-1 ring-sky-500/20'
+    };
+  }
+
+  // LYD -> Vibrant Golden Amber (distinct from Coffee Brown of Wallets)
+  if (currency === 'LYD') {
+    return {
+      letter,
+      badgeClass: 'bg-amber-400/25 text-amber-300 border-amber-400/50 ring-1 ring-amber-400/25'
+    };
+  }
+
+  // BDT (Default) -> Teal / Green
+  return {
+    letter,
+    badgeClass: 'bg-teal-500/20 text-teal-300 border-teal-500/35 ring-1 ring-teal-500/20'
+  };
+}
+
+export function AccountBadgeIcon({
+  account,
+  size = 'md',
+  className = ''
+}: {
+  account?: BankAccount | { id?: string; name?: string; currency?: string; parentId?: string; isParent?: boolean } | null;
+  size?: 'xs' | 'sm' | 'md' | 'lg';
+  className?: string;
+}) {
+  const visual = getAccountVisual(account);
+
+  const sizeClasses = {
+    xs: 'w-4 h-4 text-[9px] rounded font-extrabold',
+    sm: 'w-5 h-5 text-[10px] rounded-md font-extrabold',
+    md: 'w-6 h-6 text-xs rounded-lg font-black',
+    lg: 'w-8 h-8 text-sm rounded-lg font-black'
+  }[size];
+
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center justify-center shrink-0 border select-none leading-none shadow-sm",
+        visual.badgeClass,
+        sizeClasses,
+        className
+      )}
+      title={account?.name}
+    >
+      {visual.letter}
+    </span>
+  );
 }
 
 // ── Search Highlight Helper ─────────────────────────────────────────────
@@ -317,13 +508,19 @@ export const DEFAULT_CATEGORIES: AppCategory[] = [
     id: 'cat-finance-income',
     name: 'Finance Income',
     type: 'Income',
-    subCategories: ['FDR Interest', 'Provisional Profit', 'Dividend', 'Investment Interest', 'Sukuk Rent', 'Other Finance Income']
+    subCategories: ['FDR Interest', 'Provisional Profit', 'Dividend', 'Sukuk Rent', 'Other Finance Income']
   },
   {
     id: 'cat-other-income',
     name: 'Other Income',
     type: 'Income',
-    subCategories: ['Book Royalty', 'Podcast Royalty', 'Other Income']
+    subCategories: ['Book Royalty', 'Podcast Royalty', 'Investment Interest', 'Other Income']
+  },
+  {
+    id: 'cat-capital-gain',
+    name: 'Capital Gain',
+    type: 'Income',
+    subCategories: ['Stocks Capital Gain']
   },
   {
     id: 'cat-loan-income',
@@ -372,7 +569,7 @@ export const DEFAULT_CATEGORIES: AppCategory[] = [
     id: 'cat-other-expense',
     name: 'Other Expense',
     type: 'Expense',
-    subCategories: ['TDS on Provisional Profit', 'Account Maintenance Fees', 'Other Bank Charges']
+    subCategories: ['TDS on Provisional Profit', 'Account Maintenance Fees', 'Other Bank Charges', 'Account Related Fees']
   },
   {
     id: 'cat-loan-expense',
@@ -382,11 +579,345 @@ export const DEFAULT_CATEGORIES: AppCategory[] = [
   }
 ];
 
-// Colors for Pie Charts
-const COLORS = [
-  '#2dd4bf', '#38bdf8', '#818cf8', '#c084fc', 
-  '#f472b6', '#fb7185', '#f59e0b', '#a3e635'
+// ── Palette (DSE Tracker Theme) ──────────────────────────────────────────
+const HOLDING_COLORS = [
+  '#2dd4bf','#3b82f6','#a855f7','#f59e0b','#ef4444',
+  '#ec4899','#06b6d4','#84cc16','#f97316','#8b5cf6',
+  '#14b8a6','#eab308','#6366f1','#10b981','#fb923c',
+  '#e879f9','#38bdf8','#a3e635','#fb7185','#34d399',
+  '#60a5fa','#c084fc','#fbbf24','#f472b6','#4ade80',
 ];
+
+interface AnalyticsDonutSlice {
+  id: string;
+  name: string;
+  value: number;
+  pct: number;
+  color: string;
+}
+
+// ── SVG donut helpers (pure SVG matching DSE Tracker) ──────────────────────────
+function toXY(cx: number, cy: number, r: number, angleDeg: number) {
+  const rad = (angleDeg * Math.PI) / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+
+function buildArcPath(
+  cx: number, cy: number,
+  outerR: number, innerR: number,
+  startDeg: number, sweepDeg: number,
+): string {
+  const sw = Math.min(Math.max(sweepDeg, 0.01), 359.9999);
+  const end = startDeg - sw;
+  const lg = sw > 180 ? 1 : 0;
+
+  const os = toXY(cx, cy, outerR, startDeg);
+  const oe = toXY(cx, cy, outerR, end);
+  const ie = toXY(cx, cy, innerR, end);
+  const is = toXY(cx, cy, innerR, startDeg);
+
+  return (
+    `M ${os.x.toFixed(3)} ${os.y.toFixed(3)} ` +
+    `A ${outerR} ${outerR} 0 ${lg} 0 ${oe.x.toFixed(3)} ${oe.y.toFixed(3)} ` +
+    `L ${ie.x.toFixed(3)} ${ie.y.toFixed(3)} ` +
+    `A ${innerR} ${innerR} 0 ${lg} 1 ${is.x.toFixed(3)} ${is.y.toFixed(3)} Z`
+  );
+}
+
+const AnalyticsDonutChart: React.FC<{
+  slices: AnalyticsDonutSlice[];
+  excluded: Set<string>;
+  size?: number;
+  centerLabel?: string;
+  itemNoun?: string;
+  totalCount?: number;
+}> = ({ slices, excluded, size = 260, centerLabel = 'TOTAL', itemNoun = 'ITEMS', totalCount }) => {
+  const [hov, setHov] = React.useState<number | null>(null);
+  const CX = 150, CY = 150, OUTER = 126, INNER = 68, GAP = 1.4;
+
+  const visibleSlices = React.useMemo(() => {
+    const total = slices.filter(s => !excluded.has(s.id)).reduce((sum, s) => sum + s.value, 0);
+    if (total === 0) return [];
+    return slices
+      .filter(s => !excluded.has(s.id))
+      .map(s => ({ ...s, adjPct: s.value / total }));
+  }, [slices, excluded]);
+
+  const arcs = React.useMemo(() => {
+    let cursor = 0;
+    return visibleSlices.map(s => {
+      const totalSweep = s.adjPct * 360;
+      const start = cursor;
+      const sweep = Math.max(0, totalSweep - GAP);
+      cursor -= totalSweep;
+      return { ...s, start, sweep };
+    });
+  }, [visibleSlices]);
+
+  const hovSlice = hov !== null ? arcs[hov] : null;
+
+  return (
+    <svg
+      viewBox="0 0 300 300"
+      style={{ width: size, height: size, flexShrink: 0, overflow: 'visible' }}
+    >
+      {arcs.map((arc, i) => {
+        if (arc.sweep <= 0) return null;
+        const isHov = hov === i;
+        const dimmed = hov !== null && !isHov;
+        return (
+          <path
+            key={arc.id}
+            d={buildArcPath(CX, CY, OUTER, INNER, arc.start, arc.sweep)}
+            fill={arc.color}
+            opacity={dimmed ? 0.28 : 1}
+            style={{
+              transition: 'opacity 0.5s ease, transform 0.5s ease',
+              cursor: 'pointer',
+              transformOrigin: `${CX}px ${CY}px`,
+              transform: isHov ? 'scale(1.06)' : 'scale(1)',
+            }}
+            onMouseEnter={() => setHov(i)}
+            onMouseLeave={() => setHov(null)}
+          />
+        );
+      })}
+
+      {arcs.length === 0 && (
+        <circle cx={CX} cy={CY} r={OUTER} fill="none" stroke="#1e293b" strokeWidth={OUTER - INNER} />
+      )}
+
+      {hovSlice ? (
+        <>
+          <text x={CX} y={CY - 14} textAnchor="middle" fill="#e2e8f0"
+            fontSize={12} fontWeight={700} letterSpacing={0.5}>
+            {hovSlice.name.length > 18 ? hovSlice.name.slice(0, 17) + '…' : hovSlice.name}
+          </text>
+          <text x={CX} y={CY + 10} textAnchor="middle" fill={hovSlice.color}
+            fontSize={22} fontWeight={800}>{(hovSlice.adjPct * 100).toFixed(1)}%</text>
+          <text x={CX} y={CY + 28} textAnchor="middle" fill="#475569"
+            fontSize={9} fontWeight={600}>{formatBDT(hovSlice.value)}</text>
+        </>
+      ) : (
+        <>
+          <text x={CX} y={CY - 8} textAnchor="middle" fill="#64748b"
+            fontSize={10} fontWeight={700} letterSpacing={0.5}>{centerLabel}</text>
+          <text x={CX} y={CY + 14} textAnchor="middle" fill="#e2e8f0"
+            fontSize={16} fontWeight={800}>{totalCount ?? visibleSlices.length} {itemNoun}</text>
+        </>
+      )}
+    </svg>
+  );
+};
+
+const AnalyticsPieCard: React.FC<{
+  title: string;
+  icon?: React.ReactNode;
+  emptyText: string;
+  slices: AnalyticsDonutSlice[];
+  excluded: Set<string>;
+  onToggleExcluded: (id: string) => void;
+  centerLabel: string;
+  itemNoun: string;
+  legendPosition?: 'side' | 'bottom';
+}> = ({ title, icon, emptyText, slices, excluded, onToggleExcluded, centerLabel, itemNoun, legendPosition = 'side' }) => {
+  // If more than maxItems, show first few in columns and group the rest into "Others"
+  // For bottom legend (Asset by Accounts), allow 8 items + Others (up to 9 items for 3 rows of 3)
+  const { displaySlices, otherSliceIds, isOthersExcluded } = React.useMemo(() => {
+    const maxItems = legendPosition === 'bottom' ? 8 : 5;
+    if (slices.length <= maxItems + 1) {
+      return {
+        displaySlices: slices,
+        otherSliceIds: [] as string[],
+        isOthersExcluded: false,
+      };
+    }
+
+    const firstFew = slices.slice(0, maxItems);
+    const remaining = slices.slice(maxItems);
+    const otherIds = remaining.map(s => s.id);
+    const allOthersExcluded = remaining.length > 0 && remaining.every(s => excluded.has(s.id));
+
+    const othersVal = remaining.reduce((sum, s) => sum + s.value, 0);
+    const othersPct = remaining.reduce((sum, s) => sum + s.pct, 0);
+
+    const othersSlice: AnalyticsDonutSlice = {
+      id: '__others__',
+      name: 'Others',
+      value: othersVal,
+      pct: othersPct,
+      color: '#94a3b8',
+    };
+
+    return {
+      displaySlices: [...firstFew, othersSlice],
+      otherSliceIds: otherIds,
+      isOthersExcluded: allOthersExcluded,
+    };
+  }, [slices, excluded, legendPosition]);
+
+  // Handle toggling "Others" or regular slices
+  const handleToggle = (id: string) => {
+    if (id === '__others__') {
+      if (isOthersExcluded) {
+        otherSliceIds.forEach(remId => {
+          if (excluded.has(remId)) {
+            onToggleExcluded(remId);
+          }
+        });
+      } else {
+        otherSliceIds.forEach(remId => {
+          if (!excluded.has(remId)) {
+            onToggleExcluded(remId);
+          }
+        });
+      }
+    } else {
+      onToggleExcluded(id);
+    }
+  };
+
+  // Excluded set to pass to Donut Chart
+  const effectiveExcluded = React.useMemo(() => {
+    const set = new Set(excluded);
+    if (isOthersExcluded) {
+      set.add('__others__');
+    }
+    return set;
+  }, [excluded, isOthersExcluded]);
+
+  return (
+    <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 sm:p-6 shadow-xl h-full flex flex-col">
+      <div className="flex flex-col flex-1 min-h-0">
+        <div className="flex items-center gap-2 mb-5 pb-3 border-b border-slate-800">
+          {icon || <PieChart size={20} className="text-teal-400" />}
+          <h2 className="text-subheading font-bold text-white uppercase tracking-wider">{title}</h2>
+        </div>
+
+        {slices.length === 0 ? (
+          <div className="flex items-center justify-center py-20 text-slate-600 text-[11px] font-bold uppercase tracking-wider">
+            {emptyText}
+          </div>
+        ) : legendPosition === 'bottom' ? (
+          <div className="flex flex-col items-center w-full flex-1 justify-center">
+            {/* Centered Donut Chart */}
+            <div className="flex justify-center shrink-0 mb-5">
+              <AnalyticsDonutChart
+                slices={displaySlices}
+                excluded={effectiveExcluded}
+                size={260}
+                centerLabel={centerLabel}
+                itemNoun={itemNoun}
+                totalCount={slices.length}
+              />
+            </div>
+
+            {/* Legends below the pie - Horizontally in 2 rows */}
+            <div className="w-full pt-4 border-t border-slate-800/60">
+              <div className={cn(
+                "grid gap-x-4 gap-y-2.5 w-full",
+                displaySlices.length <= 4 ? "grid-cols-2" : "grid-cols-2 sm:grid-cols-3"
+              )}>
+                {displaySlices.map(s => {
+                  const isOthers = s.id === '__others__';
+                  const isExcluded = isOthers ? isOthersExcluded : excluded.has(s.id);
+                  return (
+                    <button
+                      key={s.id}
+                      type="button"
+                      onClick={() => handleToggle(s.id)}
+                      title={`${s.name}: ${formatBDT(s.value)}`}
+                      className="flex items-center justify-between gap-2 py-1.5 px-2.5 rounded-lg transition-all hover:bg-slate-800/60 active:scale-[0.98] text-left w-full group bg-slate-950/40 border border-slate-800/60"
+                      style={{ opacity: isExcluded ? 0.35 : 1 }}
+                    >
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        <div 
+                          className="w-2.5 h-2.5 rounded-sm shrink-0" 
+                          style={{ 
+                            backgroundColor: s.color, 
+                            boxShadow: isExcluded ? 'none' : `0 0 8px ${s.color}55` 
+                          }} 
+                        />
+                        <span className={cn(
+                          'text-[11px] font-bold text-slate-300 truncate tracking-wide transition-all group-hover:text-white',
+                          isExcluded && 'line-through text-slate-600'
+                        )}>
+                          {s.name}&nbsp;
+                          <span style={{ color: isExcluded ? undefined : s.color }}>
+                            ({(s.pct * 100).toFixed(1)}%)
+                          </span>
+                        </span>
+                      </div>
+                      <span className="text-white text-[11px] font-extrabold tabular-nums shrink-0 ml-1">
+                        {formatCompactBDT(s.value)}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-col sm:flex-row items-center gap-6 my-auto">
+            {/* Donut Chart */}
+            <div className="flex justify-center shrink-0">
+              <AnalyticsDonutChart
+                slices={displaySlices}
+                excluded={effectiveExcluded}
+                size={200}
+                centerLabel={centerLabel}
+                itemNoun={itemNoun}
+                totalCount={slices.length}
+              />
+            </div>
+
+            {/* Legend - Single Column */}
+            <div className="w-full flex-1 min-w-0">
+              <div className="flex flex-col space-y-1.5 w-full">
+                {displaySlices.map(s => {
+                  const isOthers = s.id === '__others__';
+                  const isExcluded = isOthers ? isOthersExcluded : excluded.has(s.id);
+                  return (
+                    <button
+                      key={s.id}
+                      type="button"
+                      onClick={() => handleToggle(s.id)}
+                      title={`${s.name}: ${formatBDT(s.value)}`}
+                      className="flex items-center justify-between gap-2 py-1 px-2 rounded-lg transition-all hover:bg-slate-800/60 active:scale-[0.98] text-left w-full group"
+                      style={{ opacity: isExcluded ? 0.35 : 1 }}
+                    >
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        <div 
+                          className="w-2.5 h-2.5 rounded-sm shrink-0" 
+                          style={{ 
+                            backgroundColor: s.color, 
+                            boxShadow: isExcluded ? 'none' : `0 0 8px ${s.color}55` 
+                          }} 
+                        />
+                        <span className={cn(
+                          'text-[11px] font-bold text-slate-300 truncate tracking-wide transition-all group-hover:text-white',
+                          isExcluded && 'line-through text-slate-600'
+                        )}>
+                          {s.name}&nbsp;
+                          <span style={{ color: isExcluded ? undefined : s.color }}>
+                            ({(s.pct * 100).toFixed(1)}%)
+                          </span>
+                        </span>
+                      </div>
+                      <span className="text-white text-[11px] font-extrabold tabular-nums shrink-0 ml-2">
+                        {formatCompactBDT(s.value)}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
 
 interface IncomeExpenseModuleProps {
   state: AppState;
@@ -395,8 +926,8 @@ interface IncomeExpenseModuleProps {
   setActiveTab: (tab: 'summary' | 'transactions' | 'analytics' | 'settings') => void;
   triggerAdd?: boolean;
   setTriggerAdd?: (val: boolean) => void;
-  onNavigateToModule?: (module: string, initialAddData?: { date: string; amount: number; type?: 'Transfer' | 'Income' | 'Expense' | 'Loan'; targetModule?: string; description?: string }) => void;
-  inheritedData?: { date: string; amount: number; type?: 'Transfer' | 'Income' | 'Expense' | 'Loan'; targetModule?: string; description?: string } | null;
+  onNavigateToModule?: (module: string, initialAddData?: { date: string; amount: number; type?: 'Transfer' | 'Income' | 'Expense' | 'Loan'; category?: string; subCategory?: string; targetModule?: string; description?: string; linkedTxId?: string; accountId?: string; returnModule?: string; [key: string]: any }, openModal?: boolean) => void;
+  inheritedData?: { date: string; amount: number; type?: 'Transfer' | 'Income' | 'Expense' | 'Loan'; category?: string; subCategory?: string; targetModule?: string; description?: string; linkedTxId?: string; accountId?: string; returnModule?: string; [key: string]: any } | null;
   onClearInheritedData?: () => void;
 }
 
@@ -452,6 +983,7 @@ function CategoryPickerModal({
             const isSelected = selectedCategory === cat.name;
             const isExpanded = !!expandedCats[cat.id];
             const hasSubcats = cat.subCategories.length > 0;
+            const catVisual = getCategoryVisual(cat.name, cat.type);
 
             return (
               <div key={cat.id} className="flex flex-col">
@@ -477,14 +1009,19 @@ function CategoryPickerModal({
                   )}
                 >
                   <div className="flex items-start justify-between gap-1">
-                    <span className={cn(
-                      "font-semibold text-[11px] leading-tight",
-                      isSelected
-                        ? groupType === 'Income' ? "text-emerald-300" : "text-rose-300"
-                        : "text-slate-200"
-                    )}>
-                      {cat.name}
-                    </span>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <div className={cn("w-4 h-4 rounded flex items-center justify-center shrink-0 border", catVisual.bg)}>
+                        <catVisual.Icon size={10} />
+                      </div>
+                      <span className={cn(
+                        "font-semibold text-[11px] leading-tight truncate",
+                        isSelected
+                          ? groupType === 'Income' ? "text-emerald-300" : "text-rose-300"
+                          : "text-slate-200"
+                      )}>
+                        {cat.name}
+                      </span>
+                    </div>
                     {isSelected && !hasSubcats && (
                       <Check size={10} className={groupType === 'Income' ? "text-emerald-400 shrink-0 mt-0.5" : "text-rose-400 shrink-0 mt-0.5"} />
                     )}
@@ -499,7 +1036,7 @@ function CategoryPickerModal({
                     )}
                   </div>
                   {hasSubcats && (
-                    <span className="text-[9px] text-slate-500 font-semibold">
+                    <span className="text-[9px] text-slate-500 font-semibold pl-5.5">
                       {cat.subCategories.length} sub-ledgers
                     </span>
                   )}
@@ -524,7 +1061,7 @@ function CategoryPickerModal({
                               : "bg-slate-950/60 border-slate-800/60 text-slate-400 hover:text-slate-200 hover:border-slate-700"
                           )}
                         >
-                          <span>{sub}</span>
+                          <span className="truncate">{sub}</span>
                           {isSubSelected && <Check size={9} className="shrink-0" />}
                         </button>
                       );
@@ -686,14 +1223,17 @@ function AccountPickerModal({
         )}
       >
         <div className="flex items-start justify-between gap-1">
-          <span className={cn(
-            "font-semibold text-[11px] leading-tight",
-            isSelected
-              ? acc.currency === 'BDT' ? "text-teal-300" : acc.currency === 'LYD' ? "text-amber-300" : "text-sky-300"
-              : "text-slate-200"
-          )}>
-            {acc.name}
-          </span>
+          <div className="flex items-center gap-1.5 min-w-0 pr-1">
+            <AccountBadgeIcon account={acc} size="xs" />
+            <span className={cn(
+              "font-semibold text-[11px] leading-tight truncate",
+              isSelected
+                ? acc.currency === 'BDT' ? "text-teal-300" : acc.currency === 'LYD' ? "text-amber-300" : "text-sky-300"
+                : "text-slate-200"
+            )}>
+              {acc.name}
+            </span>
+          </div>
           <div className="flex items-center gap-1 shrink-0">
             <span className={cn(
               "text-[8px] font-extrabold px-1.5 py-0.5 rounded border",
@@ -744,6 +1284,7 @@ function AccountPickerModal({
                 className="w-full flex items-center justify-between px-1 mb-2 group"
               >
                 <div className="text-[9px] font-extrabold uppercase tracking-widest text-slate-400 group-hover:text-slate-200 transition-colors flex items-center gap-2">
+                  <AccountBadgeIcon account={parent} size="xs" />
                   <span>{parent.name}</span>
                   <span className={cn(
                     "text-[8px] font-bold px-1.5 py-0.5 rounded border",
@@ -814,7 +1355,7 @@ export function IncomeExpenseModule({
   }, [categories]);
 
   const transactions: IncomeExpenseTransaction[] = useMemo(() => state.incomeExpenseTransactions || [], [state.incomeExpenseTransactions]);
-  const conversionRates = useMemo(() => state.conversionRates || { USD_to_BDT: 118, LYD_to_BDT: 24.5 }, [state.conversionRates]);
+  const conversionRates = useMemo(() => state.conversionRates || { USD_to_BDT: 120, LYD_to_BDT: 20 }, [state.conversionRates]);
 
   const USD_rate = conversionRates.USD_to_BDT;
   const LYD_rate = conversionRates.LYD_to_BDT;
@@ -823,10 +1364,8 @@ export function IncomeExpenseModule({
   const [rangeType, setRangeType] = useState<'this' | 'fiscal' | 'custom'>('fiscal');
   const [customDates, setCustomDates] = useState(() => {
     const now = new Date();
-    const yStr = now.getFullYear();
-    const mStr = String(now.getMonth() + 1).padStart(2, '0');
     return {
-      start: `${yStr}-${mStr}-01`,
+      start: '2025-01-01',
       end: now.toISOString().split('T')[0]
     };
   });
@@ -842,7 +1381,120 @@ export function IncomeExpenseModule({
   });
 
   const [isRangeMenuOpen, setIsRangeMenuOpen] = useState(false);
-  const [isActionMenuOpen, setIsActionMenuOpen] = useState(false);
+  const [isSettingsMenuOpen, setIsSettingsMenuOpen] = useState(false);
+
+  // Excluded items for analytics pie charts (interactive toggle matching DSE Tracker)
+  const [excludedExpenseCats, setExcludedExpenseCats] = useState<Set<string>>(new Set());
+  const [excludedIncomeCats, setExcludedIncomeCats] = useState<Set<string>>(new Set());
+  const [excludedAssetAccounts, setExcludedAssetAccounts] = useState<Set<string>>(new Set());
+
+  const toggleExcludedExpense = (id: string) => {
+    setExcludedExpenseCats(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleExcludedIncome = (id: string) => {
+    setExcludedIncomeCats(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleExcludedAsset = (id: string) => {
+    setExcludedAssetAccounts(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  // Interactive series visibility for Income vs Expense Flow bar chart (matching DSE Tracker)
+  const [flowView, setFlowView] = useState<'monthly' | 'cumulative'>('monthly');
+  const [hiddenFlowSeries, setHiddenFlowSeries] = useState<Set<string>>(new Set());
+  const toggleFlowSeries = (key: string) => {
+    setHiddenFlowSeries(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  // Range state for Income vs Expense Flow bar chart (matching DSE Tracker Transaction History)
+  const [flowRange, setFlowRange] = useState<'last6m' | 'last12m' | 'fiscal' | 'custom'>('last6m');
+  const [flowMonthOffset, setFlowMonthOffset] = useState(0);
+  const [flowFiscalOffset, setFlowFiscalOffset] = useState(0);
+  const [flowCustomDates, setFlowCustomDates] = useState(() => {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+    const toStr = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return {
+      start: toStr(start),
+      end: toStr(now)
+    };
+  });
+  const [isFlowRangeOpen, setIsFlowRangeOpen] = useState(false);
+
+  const { flowStartStr, flowEndStr } = useMemo(() => {
+    const now = new Date();
+    const toStr = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const todayStr = toStr(now);
+
+    if (flowRange === 'last6m') {
+      const targetEnd = new Date(now.getFullYear(), now.getMonth() + flowMonthOffset + 1, 0);
+      const targetStart = new Date(now.getFullYear(), now.getMonth() + flowMonthOffset - 5, 1);
+      const endStr = flowMonthOffset === 0 ? todayStr : toStr(targetEnd);
+      return { flowStartStr: toStr(targetStart), flowEndStr: endStr };
+    }
+    if (flowRange === 'last12m') {
+      const targetEnd = new Date(now.getFullYear(), now.getMonth() + flowMonthOffset + 1, 0);
+      const targetStart = new Date(now.getFullYear(), now.getMonth() + flowMonthOffset - 11, 1);
+      const endStr = flowMonthOffset === 0 ? todayStr : toStr(targetEnd);
+      return { flowStartStr: toStr(targetStart), flowEndStr: endStr };
+    }
+    if (flowRange === 'fiscal') {
+      const currentYear = now.getFullYear();
+      const isPostJuly = now.getMonth() >= 6;
+      const baseStartYear = (isPostJuly ? currentYear : currentYear - 1) + flowFiscalOffset;
+      const start = `${baseStartYear}-07-01`;
+      const end = flowFiscalOffset === 0 ? todayStr : `${baseStartYear + 1}-06-30`;
+      return { flowStartStr: start, flowEndStr: end };
+    }
+    // For custom, include whole month of start
+    const startVal = flowCustomDates.start || '2020-01-01';
+    const parts = startVal.split('-');
+    const cy = Number(parts[0]) || 2020;
+    const cm = Number(parts[1]) || 1;
+    const startOfCustomMonth = `${cy}-${String(cm).padStart(2, '0')}-01`;
+    return {
+      flowStartStr: startOfCustomMonth,
+      flowEndStr: flowCustomDates.end || '9999-12-31'
+    };
+  }, [flowRange, flowMonthOffset, flowFiscalOffset, flowCustomDates]);
+
+  const navigateFlowDate = (dir: -1 | 1) => {
+    if (flowRange === 'last6m' || flowRange === 'last12m') {
+      setFlowMonthOffset(prev => prev + dir);
+    } else if (flowRange === 'fiscal') {
+      setFlowFiscalOffset(prev => prev + dir);
+    } else if (flowRange === 'custom') {
+      setFlowCustomDates(prev => {
+        const s = new Date(prev.start || '2020-01-01');
+        const e = new Date(prev.end || '2020-01-01');
+        const newS = new Date(s.getFullYear(), s.getMonth() + dir, 1);
+        const newE = new Date(e.getFullYear(), e.getMonth() + dir + 1, 0);
+        const toStr = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        return { start: toStr(newS), end: toStr(newE) };
+      });
+    }
+  };
 
   // Helper date generators
   const getFirstOfMonth = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
@@ -895,6 +1547,16 @@ export function IncomeExpenseModule({
     ];
     return `${months[d.getMonth()]} ${d.getFullYear()}`;
   };
+
+  const selectedPeriodLabel = useMemo(() => {
+    if (rangeType === 'this') {
+      return formatThisMonthLabel(thisMonthDate);
+    }
+    if (rangeType === 'fiscal') {
+      return `July ${fiscalStartYear} - June ${fiscalStartYear + 1}`;
+    }
+    return `${formatDate(customDates.start)} - ${formatDate(customDates.end)}`;
+  }, [rangeType, thisMonthDate, fiscalStartYear, customDates]);
 
   // Drag states and handlers for reordering accounts in settings
   const [draggableRowId, setDraggableRowId] = useState<string | null>(null);
@@ -1057,6 +1719,11 @@ export function IncomeExpenseModule({
     const isIncome = t.type === 'Income' || (t.type === 'Loan' && (t.subCategory === 'Borrowed' || t.subCategory === 'Received Lent Money')) || (t.type === 'Transfer' && t.transferType === 'to');
     const isExpense = t.type === 'Expense' || (t.type === 'Loan' && (t.subCategory === 'Lent' || t.subCategory === 'Repaid Borrowed Money')) || (t.type === 'Transfer' && t.transferType === 'from');
 
+    // A Sell that resulted in a realized loss is still type "Income" (Capital Gain /
+    // Stocks Capital Gain) but its amount is negative — show it in red instead of green.
+    if (isIncome && t.amount < 0) {
+      return { className: 'text-rose-400', prefix: '-' };
+    }
     if (isIncome) {
       return { className: 'text-emerald-400', prefix: '+' };
     }
@@ -1254,17 +1921,50 @@ export function IncomeExpenseModule({
 
   // Custom non-blocking Alert & Confirm dialog states
   const [customAlert, setCustomAlert] = useState<{ message: string; title: string } | null>(null);
-  const [customConfirm, setCustomConfirm] = useState<{ message: string; title: string; onConfirm: () => void } | null>(null);
+  const [customConfirm, setCustomConfirm] = useState<{ 
+    message: string; 
+    title: string; 
+    onConfirm: () => void;
+    variant?: 'danger' | 'warning' | 'info' | 'severe' | 'critical';
+    confirmLabel?: string;
+    cancelLabel?: string;
+    details?: (string | null | undefined)[];
+  } | null>(null);
 
   const runAlert = (message: string, title: string = "Notice") => {
     setCustomAlert({ message, title });
   };
 
-  const runConfirm = (message: string, onConfirm: () => void, title: string = "Confirm Action") => {
-    setCustomConfirm({ message, title, onConfirm });
+  const runConfirm = (
+    message: string, 
+    onConfirm: () => void, 
+    title: string = "Confirm Action",
+    options?: {
+      variant?: 'danger' | 'warning' | 'info' | 'severe' | 'critical';
+      confirmLabel?: string;
+      cancelLabel?: string;
+      details?: (string | null | undefined)[];
+    }
+  ) => {
+    setCustomConfirm({ 
+      message, 
+      title, 
+      onConfirm,
+      variant: options?.variant || 'danger',
+      confirmLabel: options?.confirmLabel,
+      cancelLabel: options?.cancelLabel,
+      details: options?.details
+    });
   };
   
-  const [syncToDse, setSyncToDse] = useState<boolean>(true);
+      const [syncToDse, setSyncToDse] = useState<boolean>(true);
+  const [inheritedDseTxId, setInheritedDseTxId] = useState<string | undefined>(undefined);
+  const [inheritedMfGroupId, setInheritedMfGroupId] = useState<string | undefined>(undefined);
+  const [inheritedSukukGroupId, setInheritedSukukGroupId] = useState<string | undefined>(undefined);
+  const [inheritedSukukRentTxId, setInheritedSukukRentTxId] = useState<string | undefined>(undefined);
+  const [inheritedFdrProfitTxId, setInheritedFdrProfitTxId] = useState<string | undefined>(undefined);
+  const [inheritedOnlineGroupId, setInheritedOnlineGroupId] = useState<string | undefined>(undefined);
+  const [inheritedOnlineInstallmentTxId, setInheritedOnlineInstallmentTxId] = useState<string | undefined>(undefined);
 
   const [txForm, setTxForm] = useState({
     date: new Date().toISOString().split('T')[0],
@@ -1301,6 +2001,10 @@ export function IncomeExpenseModule({
         const targetDate = inheritedData.date || new Date().toISOString().split('T')[0];
         const targetAmount = inheritedData.amount ? String(inheritedData.amount) : '';
         const targetDesc = inheritedData.description || '';
+        setInheritedDseTxId(inheritedData.targetModule === 'sukuk-rent' ? undefined : inheritedData.linkedTxId);
+        setInheritedSukukRentTxId(inheritedData.targetModule === 'sukuk-rent' ? inheritedData.linkedTxId : undefined);
+        setInheritedFdrProfitTxId((inheritedData.targetModule === 'fdr-profit' || inheritedData.targetModule === 'fdr-charge') ? inheritedData.linkedTxId : undefined);
+        setInheritedOnlineInstallmentTxId((inheritedData.targetModule === 'online-installment' || inheritedData.targetModule === 'online-interest' || inheritedData.targetModule === 'online-return') ? inheritedData.linkedTxId : undefined);
 
         // Find appropriate toAccountId based on target module
         let targetToAcc = accounts.find(a => !a.isParent && (a.id === 'bdt-mutual-fund' || a.id === 'bdt-online-investment' || a.id === 'bdt-sukuk' || a.id === 'bdt-ibbl-fdr' || a.id === 'bdt-fdr'));
@@ -1312,31 +2016,143 @@ export function IncomeExpenseModule({
           targetToAcc = accounts.find(a => isSukukAccount(a)) || targetToAcc;
         } else if (inheritedData.targetModule === 'fdrs' || inheritedData.targetModule === 'fixed-deposits') {
           targetToAcc = accounts.find(a => isFdrAccount(a)) || targetToAcc;
-        } else if (inheritedData.targetModule === 'dse') {
+        } else if (inheritedData.targetModule === 'dse' || inheritedData.targetModule === 'dse-dividend') {
           targetToAcc = accounts.find(a => isBoAccount(a)) || targetToAcc;
+        } else if (inheritedData.targetModule === 'dse-withdrawal') {
+          // DSE Withdrawal = Transfer FROM BO Account TO a normal account.
+          targetToAcc = accounts.find(a =>
+            !a.isParent &&
+            a.currency === 'BDT' &&
+            !isBoAccount(a) &&
+            !isMutualFundAccount(a) &&
+            !isOnlineInvestmentAccount(a) &&
+            !isSukukAccount(a) &&
+            !isFdrAccount(a)
+          ) || accounts.find(a => !a.isParent && !isBoAccount(a)) || targetToAcc;
+        } else if (inheritedData.targetModule === 'online-return' || inheritedData.targetModule === 'online-interest') {
+          // Online Investment repayment / interest: Transfer To / receiving Account = City Islamic
+          targetToAcc = accounts.find(a => !a.isParent && a.name.toLowerCase().includes('city islamic')) || accounts.find(a => !a.isParent && a.name.toLowerCase().includes('city')) || targetToAcc;
+        } else if (inheritedData.targetModule === 'mutual-funds-withdrawal') {
+          // Mutual Fund Withdrawal = Transfer FROM Mutual Fund Account TO City Islamic Account.
+          targetToAcc = accounts.find(a => !a.isParent && a.name.toLowerCase().includes('city islamic')) || accounts.find(a => !a.isParent && a.name.toLowerCase().includes('city')) || targetToAcc;
         }
         if (!targetToAcc) {
           targetToAcc = accounts.filter(a => !a.isParent)[1] || accounts[0];
         }
 
-        // Pick source account (non-parent account, preferably BDT bank and not the target account)
+        // Pick source account (non-parent account, preferably matching specific context or default BDT bank)
         const nonParentAccounts = accounts.filter(a => !a.isParent);
-        const sourceAcc = nonParentAccounts.find(a => a.id !== targetToAcc?.id && a.currency === 'BDT' && !isMutualFundAccount(a) && !isOnlineInvestmentAccount(a) && !isSukukAccount(a) && !isFdrAccount(a) && !isBoAccount(a))
-          || nonParentAccounts.find(a => a.id !== targetToAcc?.id)
-          || accounts[0];
+        
+        let explicitAcc: BankAccount | undefined = undefined;
+        if (inheritedData.accountId) {
+          explicitAcc = nonParentAccounts.find(a => a.id === inheritedData.accountId);
+        }
 
-        let defaultCat = targetType === 'Transfer' ? 'Transfer' : '';
-        let defaultSubCat = '';
-        if (targetType === 'Income') {
-          const finCat = categories.find(c => c.name.toLowerCase().includes('finance') || c.name.toLowerCase().includes('income'));
-          if (finCat) {
-            defaultCat = finCat.name;
-            const fdrSub = finCat.subCategories?.find(s => s.toLowerCase().includes('fdr') || s.toLowerCase().includes('profit') || s.toLowerCase().includes('interest'));
-            if (fdrSub) defaultSubCat = fdrSub;
+        // For FDR Profit / Charge: in case of 1409 default to IBBL Savings, for 0216 default to IBBL FDR USD
+        if (!explicitAcc && (inheritedData.targetModule === 'fdr-profit' || inheritedData.targetModule === 'fdr-charge' || targetDesc.toLowerCase().includes('fixed deposit') || targetDesc.toLowerCase().includes('fdr'))) {
+          const descLower = targetDesc.toLowerCase();
+          if (descLower.includes('1409')) {
+            explicitAcc = nonParentAccounts.find(a => a.id === 'bdt-ibbl-savings' || a.name.toLowerCase().includes('ibbl savings'));
+          } else if (descLower.includes('0216')) {
+            explicitAcc = nonParentAccounts.find(a => a.id === 'usd-ibbl-fdr' || (a.name.toLowerCase().includes('ibbl') && a.name.toLowerCase().includes('fdr') && a.currency === 'USD') || a.name.toLowerCase().includes('ibbl fdr usd'));
           }
         }
 
-        setSyncToDse(isBoAccount(targetToAcc));
+        const onlineAcc = nonParentAccounts.find(a => isOnlineInvestmentAccount(a)) || accounts.find(a => a.id === 'bdt-online-investment');
+        const mutualFundAcc = nonParentAccounts.find(a => isMutualFundAccount(a)) || accounts.find(a => a.id === 'bdt-mutual-fund');
+        const cityIslamicAcc = nonParentAccounts.find(a => a.name.toLowerCase().includes('city islamic')) || nonParentAccounts.find(a => a.name.toLowerCase().includes('city'));
+
+        const bankAcc = explicitAcc
+          || (inheritedData.targetModule === 'online-interest' ? cityIslamicAcc : undefined)
+          || (inheritedData.targetModule === 'dse-dividend' ? nonParentAccounts.find(a => isBoAccount(a)) : undefined)
+          || nonParentAccounts.find(a => a.currency === 'BDT' && !isMutualFundAccount(a) && !isOnlineInvestmentAccount(a) && !isSukukAccount(a) && !isFdrAccount(a) && !isBoAccount(a))
+          || nonParentAccounts[0]
+          || accounts[0];
+
+        const sourceAcc = inheritedData.targetModule === 'dse-withdrawal'
+          ? (explicitAcc || nonParentAccounts.find(a => isBoAccount(a)) || bankAcc)
+          : inheritedData.targetModule === 'dse-dividend'
+            ? (explicitAcc || nonParentAccounts.find(a => isBoAccount(a)) || bankAcc)
+            : inheritedData.targetModule === 'dse-charge'
+              ? (explicitAcc || nonParentAccounts.find(a => isBoAccount(a)) || bankAcc)
+              : inheritedData.targetModule === 'online-return'
+            ? (explicitAcc || onlineAcc || bankAcc)
+            : inheritedData.targetModule === 'online-interest'
+              ? (targetType === 'Income' ? (cityIslamicAcc || bankAcc) : (onlineAcc || bankAcc))
+              : inheritedData.targetModule === 'mutual-funds-withdrawal'
+                ? (explicitAcc || mutualFundAcc || bankAcc)
+                : inheritedData.targetModule === 'mutual-funds-dividend'
+                  ? (explicitAcc || mutualFundAcc || bankAcc)
+                  : inheritedData.targetModule === 'fdr-charge'
+                    ? (explicitAcc || bankAcc)
+                    : targetType === 'Income'
+                    ? (explicitAcc || bankAcc)
+                    : (nonParentAccounts.find(a => a.id !== targetToAcc?.id && a.currency === 'BDT' && !isMutualFundAccount(a) && !isOnlineInvestmentAccount(a) && !isSukukAccount(a) && !isFdrAccount(a) && !isBoAccount(a))
+                       || nonParentAccounts.find(a => a.id !== targetToAcc?.id)
+                       || accounts[0]);
+
+        if (inheritedData.targetModule === 'online-interest' && cityIslamicAcc) {
+          targetToAcc = cityIslamicAcc;
+        }
+
+        let defaultCat = targetType === 'Transfer' ? 'Transfer' : '';
+        let defaultSubCat = '';
+        if (inheritedData.category) {
+          defaultCat = inheritedData.category;
+          defaultSubCat = inheritedData.subCategory || '';
+        } else if (inheritedData.targetModule === 'online-interest') {
+          defaultCat = 'Other Income';
+          defaultSubCat = 'Investment Interest';
+        } else if (inheritedData.targetModule === 'dse-dividend') {
+          const finCat = categories.find(c => c.name.toLowerCase().includes('finance') || c.name.toLowerCase().includes('income') || c.name.toLowerCase().includes('investment'));
+          defaultCat = finCat ? finCat.name : 'Finance Income';
+          const sub = finCat?.subCategories?.find(s => s.toLowerCase().includes('dividend'));
+          defaultSubCat = sub || 'Dividend';
+        } else if (targetType === 'Income') {
+          const finCat = categories.find(c => c.name.toLowerCase().includes('finance') || c.name.toLowerCase().includes('income') || c.name.toLowerCase().includes('investment'));
+          if (finCat) {
+            defaultCat = finCat.name;
+            const sub = finCat.subCategories?.find(s => s.toLowerCase().includes('online') || s.toLowerCase().includes('interest') || s.toLowerCase().includes('profit') || s.toLowerCase().includes('fdr'));
+            if (sub) defaultSubCat = sub;
+          }
+        }
+
+        const isTargetModuleDse = inheritedData.targetModule === 'dse' ||
+          inheritedData.targetModule === 'dse-dividend' ||
+          inheritedData.targetModule === 'dse-withdrawal' ||
+          inheritedData.targetModule === 'dse-sell' ||
+          inheritedData.targetModule === 'dse-charge';
+        const isTargetModuleNonDse = inheritedData.targetModule === 'online' ||
+          inheritedData.targetModule === 'online-interest' ||
+          inheritedData.targetModule === 'online-return' ||
+          inheritedData.targetModule === 'online-installment' ||
+          inheritedData.targetModule === 'mutual-funds' ||
+          inheritedData.targetModule === 'mutual-funds-dividend' ||
+          inheritedData.targetModule === 'mutual-funds-withdrawal' ||
+          inheritedData.targetModule === 'sukuk' ||
+          inheritedData.targetModule === 'sukuk-rent' ||
+          inheritedData.targetModule === 'fdr' ||
+          inheritedData.targetModule === 'fdr-profit' ||
+          inheritedData.targetModule === 'fdr-charge';
+
+        setSyncToDse(
+          !isTargetModuleNonDse && (
+            isTargetModuleDse ||
+            (targetType === 'Transfer' && (isBoAccount(targetToAcc) || isBoAccount(sourceAcc))) ||
+            (targetType === 'Income' && (isBoAccount(sourceAcc) || isTargetModuleDse)) ||
+            (targetType === 'Expense' && (isBoAccount(sourceAcc) || isTargetModuleDse))
+          )
+        );
+        setInheritedMfGroupId(
+          (inheritedData.targetModule === 'mutual-funds' ||
+           inheritedData.targetModule === 'mutual-funds-withdrawal' ||
+           inheritedData.targetModule === 'mutual-funds-dividend')
+            ? inheritedData.linkedTxId
+            : undefined
+        );
+        setInheritedSukukGroupId(inheritedData.targetModule === 'sukuk' ? inheritedData.linkedTxId : undefined);
+        setInheritedOnlineGroupId(inheritedData.targetModule === 'online' ? inheritedData.linkedTxId : undefined);
+        setInheritedOnlineInstallmentTxId((inheritedData.targetModule === 'online-installment' || inheritedData.targetModule === 'online-interest' || inheritedData.targetModule === 'online-return') ? inheritedData.linkedTxId : undefined);
         setTxForm({
           date: targetDate,
           type: targetType,
@@ -1349,9 +2165,18 @@ export function IncomeExpenseModule({
           description: targetDesc
         });
 
-        if (onClearInheritedData) onClearInheritedData();
+        setTimeout(() => {
+          if (onClearInheritedData) onClearInheritedData();
+        }, 0);
       } else {
         isFromExternalModuleRef.current = false;
+        setInheritedDseTxId(undefined);
+        setInheritedMfGroupId(undefined);
+        setInheritedSukukGroupId(undefined);
+        setInheritedSukukRentTxId(undefined);
+        setInheritedFdrProfitTxId(undefined);
+        setInheritedOnlineGroupId(undefined);
+        setInheritedOnlineInstallmentTxId(undefined);
         const initialToAcc = accounts[1] || accounts[0];
         setSyncToDse(isBoAccount(initialToAcc));
         setTxForm({
@@ -1367,7 +2192,9 @@ export function IncomeExpenseModule({
         });
       }
       setIsTxModalOpen(true);
-      if (setTriggerAdd) setTriggerAdd(false);
+      setTimeout(() => {
+        if (setTriggerAdd) setTriggerAdd(false);
+      }, 0);
     }
   }, [triggerAdd, setTriggerAdd, accounts, inheritedData, onClearInheritedData]);
 
@@ -1380,11 +2207,26 @@ export function IncomeExpenseModule({
     return categories.find(c => c.name === txForm.category) || null;
   }, [categories, txForm.category]);
 
+  // Auto pre-select the "Sync" checkbox when creating a brand-new Dividend
+  // income entry against a BO Account (DSE Tracker).
+  useEffect(() => {
+    if (editingTx) return;
+    if (txForm.type !== 'Income') return;
+    const isDividendSub = (txForm.subCategory || '').toLowerCase().includes('dividend');
+    if (!isDividendSub) return;
+    if (isBoAccount(selectedAccount)) {
+      setSyncToDse(true);
+    } else {
+      setSyncToDse(false);
+    }
+  }, [editingTx, txForm.type, txForm.subCategory, selectedAccount]);
+
   // Clean form when type switches
   const handleTypeChange = (type: 'Income' | 'Expense' | 'Transfer' | 'Loan') => {
     if (type === 'Transfer') {
       const targetAcc = accounts.find(a => a.id === txForm.toAccountId);
-      if (isBoAccount(targetAcc)) {
+      const sourceAcc = accounts.find(a => a.id === txForm.accountId);
+      if (isBoAccount(targetAcc) || isBoAccount(sourceAcc)) {
         setSyncToDse(true);
       }
     }
@@ -1419,6 +2261,35 @@ export function IncomeExpenseModule({
 
     // Helper to find the most appropriate account for a category + subCategory combination
     const resolveAccountForSubCategory = (categoryName: string, subCategoryName: string) => {
+      // 0. FDR specific routing for 1409 (IBBL Savings) and 0216 (IBBL FDR USD)
+      if (subCategoryName.toLowerCase().includes('fdr') || subCategoryName.toLowerCase().includes('provisional profit') || subCategoryName.toLowerCase().includes('fixed deposit')) {
+        const queryText = (rawSearch + ' ' + txForm.description).toLowerCase();
+        if (queryText.includes('1409')) {
+          const ibblSav = accounts.find(a => !a.isParent && (a.id === 'bdt-ibbl-savings' || a.name.toLowerCase().includes('ibbl savings')));
+          if (ibblSav) {
+            return {
+              accountId: ibblSav.id,
+              accountName: ibblSav.name,
+              accountCurrency: ibblSav.currency,
+              frequency: 99,
+              lastDate: undefined
+            };
+          }
+        }
+        if (queryText.includes('0216')) {
+          const ibblFdrUsd = accounts.find(a => !a.isParent && (a.id === 'usd-ibbl-fdr' || a.name.toLowerCase().includes('ibbl fdr usd') || (a.name.toLowerCase().includes('ibbl') && a.currency === 'USD')));
+          if (ibblFdrUsd) {
+            return {
+              accountId: ibblFdrUsd.id,
+              accountName: ibblFdrUsd.name,
+              accountCurrency: ibblFdrUsd.currency,
+              frequency: 99,
+              lastDate: undefined
+            };
+          }
+        }
+      }
+
       // 1. Check history for exact category & subcategory match
       const exactMatch = sortedTxs.find(t => 
         t.category === categoryName && 
@@ -1697,13 +2568,316 @@ export function IncomeExpenseModule({
     }
   };
 
+  // ─── Mutual Fund <-> Income & Expense linked sync helper ───────────────────
+  const syncMutualFundLinkedTransfer = (groupId: string, updates: { date: string; amount: number } | null) => {
+    updateState(prev => {
+      const mutualFunds = prev.mutualFunds || [];
+      let changed = false;
+      const updatedFunds = mutualFunds.map(fund => {
+        const hasLink = fund.transactions.some(t => t.linkedIeGroupId === groupId);
+        if (!hasLink) return fund;
+        changed = true;
+        if (updates === null) {
+          return { ...fund, transactions: fund.transactions.filter(t => t.linkedIeGroupId !== groupId) };
+        }
+        return {
+          ...fund,
+          transactions: fund.transactions.map(t => {
+            if (t.linkedIeGroupId !== groupId) return t;
+            const isSip = (t.sipAmount || 0) > 0 && !t.isWithdrawal;
+            return {
+              ...t,
+              date: updates.date,
+              ...(isSip ? { sipAmount: updates.amount, pullingDate: updates.date } : { amount: updates.amount }),
+            };
+          })
+        };
+      });
+      return changed ? { ...prev, mutualFunds: updatedFunds } : prev;
+    });
+  };
+
+  const syncMutualFundDividendIncome = (
+    txId: string,
+    updates: { date: string; amount: number; description?: string; type?: string; category?: string; subCategory?: string } | null
+  ) => {
+    updateState(prev => {
+      const mutualFunds = prev.mutualFunds || [];
+      let changed = false;
+      const updatedFunds = mutualFunds.map(fund => {
+        const hasLink = fund.transactions.some(t => t.linkedIeGroupId === txId || t.id === txId);
+        if (!hasLink) return fund;
+        changed = true;
+        if (updates === null) {
+          return { ...fund, transactions: fund.transactions.filter(t => t.linkedIeGroupId !== txId && t.id !== txId) };
+        }
+        return {
+          ...fund,
+          transactions: fund.transactions.map(t => {
+            if (t.linkedIeGroupId !== txId && t.id !== txId) return t;
+            const isSip = (t.sipAmount || 0) > 0 && !t.isWithdrawal;
+            return {
+              ...t,
+              date: updates.date,
+              ...(isSip ? { sipAmount: updates.amount, pullingDate: updates.date } : { amount: updates.amount }),
+            };
+          })
+        };
+      });
+      return changed ? { ...prev, mutualFunds: updatedFunds } : prev;
+    });
+  };
+
+  // ─── Sukuk <-> Income & Expense linked sync helper ────────────────────────
+  const syncSukukLinkedTransfer = (groupId: string, updates: { date: string; amount: number } | null) => {
+    updateState(prev => {
+      const sukuks = prev.sukuks || [];
+      let changed = false;
+      const updatedSukuks = sukuks.map(inv => {
+        if (inv.linkedIeGroupId !== groupId) return inv;
+        changed = true;
+        if (updates === null) {
+          return null;
+        }
+        return {
+          ...inv,
+          investmentDate: updates.date,
+          issueDate: updates.date,
+          amount: updates.amount,
+          principalAmount: updates.amount,
+        };
+      }).filter(Boolean) as any[];
+      return changed ? { ...prev, sukuks: updatedSukuks } : prev;
+    });
+  };
+
+  // ─── Sukuk Rent <-> Income & Expense linked sync helper ─────────────────────
+  const syncSukukRentIncome = (
+    txId: string,
+    updates: { date: string; amount: number; description?: string; type?: string; category?: string; subCategory?: string } | null
+  ) => {
+    updateState(prev => {
+      const sukuks = prev.sukuks || [];
+      let changed = false;
+
+      // Case 1: An installment is already linked to this txId
+      let foundLinked = false;
+      const updatedSukuks = sukuks.map(inv => {
+        const instIdx = inv.installments?.findIndex(inst => inst.linkedIncomeTxId === txId);
+        if (instIdx !== undefined && instIdx >= 0) {
+          foundLinked = true;
+          changed = true;
+          const newInstallments = [...inv.installments];
+          const isStillSukukRent = updates && updates.type === 'Income' && (
+            updates.subCategory?.toLowerCase() === 'sukuk rent' ||
+            (updates.category?.toLowerCase().includes('finance') && updates.subCategory?.toLowerCase().includes('sukuk'))
+          );
+
+          if (!isStillSukukRent || updates === null) {
+            newInstallments[instIdx] = {
+              ...newInstallments[instIdx],
+              isPaid: false,
+              actualDate: undefined,
+              actualAmount: undefined,
+              linkedIncomeTxId: undefined,
+              isAutoMarked: false,
+              isManuallyEdited: false
+            };
+          } else {
+            newInstallments[instIdx] = {
+              ...newInstallments[instIdx],
+              isPaid: true,
+              actualDate: updates.date,
+              actualAmount: updates.amount,
+              linkedIncomeTxId: txId,
+              isAutoMarked: false,
+              isManuallyEdited: true
+            };
+          }
+
+          const totalRepaid = newInstallments.reduce((sum, inst) => inst.isPaid ? sum + (inst.actualAmount !== undefined ? inst.actualAmount : inst.amount) : sum, 0);
+          const today = new Date().toISOString().split('T')[0];
+          let status = inv.status;
+          if (newInstallments.every(i => i.isPaid)) status = 'Completed';
+          else if (newInstallments.some(i => !i.isPaid && i.date < today)) status = 'Delayed';
+          else status = 'Active';
+
+          return {
+            ...inv,
+            installments: newInstallments,
+            totalRepaid,
+            status
+          };
+        }
+        return inv;
+      });
+
+      if (foundLinked) {
+        return changed ? { ...prev, sukuks: updatedSukuks } : prev;
+      }
+
+      // Do not auto-guess unlinked Sukuk investments
+      return prev;
+    });
+  };
+
+  // ─── Fixed Deposit Profit <-> Income & Expense linked sync helper ──────────
+  const syncFdrProfitIncome = (
+    txId: string,
+    updates: { date: string; amount: number; description?: string; type?: string; category?: string; subCategory?: string } | null
+  ) => {
+    updateState(prev => {
+      const fdrs = prev.fdrs || [];
+      let changed = false;
+
+      // Case 1: A transaction is already linked to this txId
+      let foundLinked = false;
+      const updatedFdrs = fdrs.map(fdr => {
+        const transIdx = fdr.transactions?.findIndex(t => t.linkedIncomeTxId === txId || t.id === txId);
+        if (transIdx !== undefined && transIdx >= 0) {
+          foundLinked = true;
+          changed = true;
+          const isStillFdrProfit = updates && updates.type === 'Income' && (
+            updates.subCategory?.toLowerCase().includes('fdr') ||
+            updates.subCategory?.toLowerCase().includes('provisional profit') ||
+            updates.subCategory?.toLowerCase().includes('fixed deposit') ||
+            (updates.category?.toLowerCase().includes('finance') && (updates.subCategory?.toLowerCase().includes('profit') || updates.subCategory?.toLowerCase().includes('interest')))
+          );
+          const isStillFdrCharge = updates && updates.type === 'Expense' && updates.category === 'Other Expense' && (
+            updates.subCategory === 'Account Related Fees' ||
+            updates.subCategory === 'Other Bank Charges' ||
+            updates.subCategory?.toLowerCase().includes('tds')
+          );
+          const isStillFdrLinked = isStillFdrProfit || isStillFdrCharge;
+
+          if (!isStillFdrLinked || updates === null) {
+            return {
+              ...fdr,
+              transactions: fdr.transactions.filter((_, idx) => idx !== transIdx)
+            };
+          } else {
+            const newTransactions = [...fdr.transactions];
+            newTransactions[transIdx] = {
+              ...newTransactions[transIdx],
+              date: updates.date,
+              amount: updates.amount,
+              type: isStillFdrProfit ? 'Profit' : 'Charge',
+              linkedIncomeTxId: txId
+            };
+            return {
+              ...fdr,
+              transactions: newTransactions
+            };
+          }
+        }
+        return fdr;
+      });
+
+      if (foundLinked) {
+        return changed ? { ...prev, fdrs: updatedFdrs } : prev;
+      }
+
+      // Do not auto-guess unlinked FDR accounts
+      return prev;
+    });
+  };
+
+  // ─── Online Investment <-> Income & Expense linked sync helper ──────────
+  const syncOnlineLinkedTransfer = (groupId: string, updates: { date: string; amount: number } | null) => {
+    updateState(prev => {
+      const onlineList = prev.onlineInvestments || [];
+      let changed = false;
+      const updatedOnline = onlineList.map(inv => {
+        if (inv.linkedIeGroupId !== groupId && inv.id !== groupId) return inv;
+        changed = true;
+        if (updates === null) {
+          return null;
+        }
+        return {
+          ...inv,
+          investmentDate: updates.date,
+          amount: updates.amount,
+        };
+      }).filter(Boolean) as any[];
+      return changed ? { ...prev, onlineInvestments: updatedOnline } : prev;
+    });
+  };
+
+  // ─── Online Investment Installment <-> Income & Expense linked sync helper ──
+  const syncOnlineInstallmentIncome = (
+    txId: string,
+    updates: { date: string; amount: number; description?: string; type?: string; category?: string; subCategory?: string } | null
+  ) => {
+    updateState(prev => {
+      const onlineList = prev.onlineInvestments || [];
+      let changed = false;
+
+      // Case 1: An installment is already linked to this txId
+      let foundLinked = false;
+      const updatedOnline = onlineList.map(inv => {
+        const instIdx = inv.installments?.findIndex(inst => inst.linkedIncomeTxId === txId || (txId && inst.linkedIncomeTxId && inst.linkedIncomeTxId === txId));
+        if (instIdx !== undefined && instIdx >= 0) {
+          foundLinked = true;
+          changed = true;
+          const newInstallments = [...inv.installments];
+          const isStillValid = updates && (updates.type === 'Income' || updates.type === 'Transfer');
+
+          if (!isStillValid || updates === null) {
+            newInstallments[instIdx] = {
+              ...newInstallments[instIdx],
+              isPaid: false,
+              actualDate: undefined,
+              actualAmount: undefined,
+              linkedIncomeTxId: undefined,
+              isAutoMarked: false,
+              isManuallyEdited: false
+            };
+          } else {
+            newInstallments[instIdx] = {
+              ...newInstallments[instIdx],
+              isPaid: true,
+              actualDate: updates.date,
+              actualAmount: updates.amount,
+              linkedIncomeTxId: txId,
+              isAutoMarked: false,
+              isManuallyEdited: true
+            };
+          }
+
+          const totalRepaid = newInstallments.reduce((sum, inst) => inst.isPaid ? sum + (inst.actualAmount !== undefined ? inst.actualAmount : inst.amount) : sum, 0);
+          const today = new Date().toISOString().split('T')[0];
+          let status = inv.status;
+          if (newInstallments.length > 0 && newInstallments.every(i => i.isPaid)) status = 'Completed';
+          else if (newInstallments.some(i => !i.isPaid && i.date < today)) status = 'Delayed';
+          else status = 'Active';
+
+          return {
+            ...inv,
+            installments: newInstallments,
+            totalRepaid,
+            status
+          };
+        }
+        return inv;
+      });
+
+      if (foundLinked) {
+        return changed ? { ...prev, onlineInvestments: updatedOnline } : prev;
+      }
+
+      return prev;
+    });
+  };
+
   // Save Transaction Handler
   const handleSaveTx = (e: React.FormEvent) => {
     e.preventDefault();
     if (!txForm.accountId || !txForm.amount) return;
 
     const parsedAmount = parseFloat(txForm.amount);
-    if (isNaN(parsedAmount) || parsedAmount <= 0) return;
+    if (isNaN(parsedAmount) || (txForm.type === 'Transfer' ? parsedAmount <= 0 : parsedAmount === 0)) return;
+
+    let cascadeGroupId: string | undefined;
 
     if (txForm.type === 'Transfer') {
       if (!txForm.toAccountId) {
@@ -1725,20 +2899,50 @@ export function IncomeExpenseModule({
       const defaultDesc = (fromAccountObj && toAccountObj) ? `${fromAccountObj.name} : ${toAccountObj.name}` : 'Transfer';
       const finalDescription = txForm.description.trim() || defaultDesc;
 
-      const groupUUID = (editingTx && editingTx.transferGroupId) ? editingTx.transferGroupId : crypto.randomUUID();
+      const isTargetMutualFund = isMutualFundAccount(toAccountObj);
+      const isSourceMutualFund = isMutualFundAccount(fromAccountObj);
+      const isMutualFundTransfer = isTargetMutualFund || isSourceMutualFund;
+      const isTargetSukuk = isSukukAccount(toAccountObj);
+      const isTargetOnline = isOnlineInvestmentAccount(toAccountObj);
+      const isSourceOnline = isOnlineInvestmentAccount(fromAccountObj);
+      const groupUUID = (editingTx && editingTx.transferGroupId)
+        ? editingTx.transferGroupId
+        : (isMutualFundTransfer && inheritedMfGroupId
+            ? inheritedMfGroupId
+            : (isTargetSukuk && inheritedSukukGroupId
+                ? inheritedSukukGroupId
+                : (isTargetOnline && inheritedOnlineGroupId
+                    ? inheritedOnlineGroupId
+                    : (inheritedOnlineInstallmentTxId || inheritedOnlineGroupId || crypto.randomUUID()))));
+      cascadeGroupId = groupUUID;
 
       const isTargetBo = isBoAccount(toAccountObj);
-      let dseTxId = (editingTx && editingTx.dseTxId) ? editingTx.dseTxId : (isTargetBo && syncToDse ? crypto.randomUUID() : undefined);
+      const isSourceBo = isBoAccount(fromAccountObj);
+      const isDseTransfer = (isTargetBo || isSourceBo) && syncToDse;
+      const dseTransactionType: 'Deposit' | 'Withdrawal' = isSourceBo ? 'Withdrawal' : 'Deposit';
+      const dseAmount = isSourceBo ? parsedAmount : parsedToAmount;
 
-      if (isTargetBo && syncToDse) {
-        if (!dseTxId) dseTxId = crypto.randomUUID();
-        const fromName = fromAccountObj?.name || 'Account';
-        const dseNote = txForm.description.trim() || `Transfer from ${fromName}`;
+      let dseTxId = (editingTx && editingTx.dseTxId)
+        ? editingTx.dseTxId
+        : (isDseTransfer ? (inheritedDseTxId || crypto.randomUUID()) : undefined);
+
+      if (isDseTransfer) {
+        if (!dseTxId) dseTxId = inheritedDseTxId || crypto.randomUUID();
+        const otherName = isSourceBo
+          ? (toAccountObj?.name || 'Account')
+          : (fromAccountObj?.name || 'Account');
+        const defaultDseNote = isSourceBo
+          ? `Transfer to ${otherName}`
+          : `Transfer from ${otherName}`;
+        const dseNote = txForm.description.trim() || defaultDseNote;
+
         syncDseDepositTransaction({
           id: dseTxId,
           date: txForm.date,
-          amount: parsedToAmount,
+          amount: dseAmount,
           notes: dseNote,
+          linkedIeGroupId: groupUUID,
+          transactionType: dseTransactionType,
           isDelete: false
         });
       } else if (editingTx?.dseTxId) {
@@ -1750,6 +2954,27 @@ export function IncomeExpenseModule({
           isDelete: true
         });
         dseTxId = undefined;
+      }
+
+      if (isTargetMutualFund || isSourceMutualFund) {
+        syncMutualFundLinkedTransfer(groupUUID, { date: txForm.date, amount: isSourceMutualFund ? parsedAmount : parsedToAmount });
+      }
+      if (isTargetSukuk) {
+        syncSukukLinkedTransfer(groupUUID, { date: txForm.date, amount: parsedToAmount });
+      }
+      if (isTargetOnline || inheritedOnlineGroupId || state.onlineInvestments?.some(o => o.linkedIeGroupId === groupUUID || (editingTx?.transferGroupId && o.linkedIeGroupId === editingTx.transferGroupId))) {
+        syncOnlineLinkedTransfer(groupUUID, { date: txForm.date, amount: isSourceOnline ? parsedAmount : parsedToAmount });
+      }
+      const linkedOnlineInstTxId = inheritedOnlineInstallmentTxId || editingTx?.onlineTxId || (state.onlineInvestments?.some(o => o.installments?.some(i => i.linkedIncomeTxId === groupUUID || i.linkedIncomeTxId === editingTx?.id || (editingTx?.transferGroupId && i.linkedIncomeTxId === editingTx.transferGroupId))) ? (inheritedOnlineInstallmentTxId || editingTx?.onlineTxId || editingTx?.id || groupUUID) : undefined);
+      if (linkedOnlineInstTxId) {
+        syncOnlineInstallmentIncome(linkedOnlineInstTxId, {
+          date: txForm.date,
+          amount: isSourceOnline ? parsedAmount : parsedToAmount,
+          description: finalDescription,
+          type: 'Transfer',
+          category: txForm.category,
+          subCategory: txForm.subCategory
+        });
       }
 
       // We generate two separate entries
@@ -1766,8 +2991,9 @@ export function IncomeExpenseModule({
         category: 'Transfer',
         subCategory: '',
         description: finalDescription,
-        dseTxId: isTargetBo && syncToDse ? dseTxId : undefined,
-        autoSyncDse: isTargetBo ? syncToDse : undefined
+        dseTxId: isDseTransfer ? dseTxId : undefined,
+        autoSyncDse: (isTargetBo || isSourceBo) ? syncToDse : undefined,
+        onlineTxId: linkedOnlineInstTxId
       };
 
       const transactionTo: IncomeExpenseTransaction = {
@@ -1783,8 +3009,9 @@ export function IncomeExpenseModule({
         category: 'Transfer',
         subCategory: '',
         description: finalDescription,
-        dseTxId: isTargetBo && syncToDse ? dseTxId : undefined,
-        autoSyncDse: isTargetBo ? syncToDse : undefined
+        dseTxId: isDseTransfer ? dseTxId : undefined,
+        autoSyncDse: (isTargetBo || isSourceBo) ? syncToDse : undefined,
+        onlineTxId: linkedOnlineInstTxId
       };
 
       updateState(prev => {
@@ -1803,16 +3030,158 @@ export function IncomeExpenseModule({
         };
       });
     } else {
+      let targetMfDividendNavTxId: string | undefined = undefined;
+      let targetSukukRentNavTxId: string | undefined = undefined;
+      let targetFdrProfitNavTxId: string | undefined = undefined;
+      let targetFdrChargeNavTxId: string | undefined = undefined;
+
+      const sourceAccObj = accounts.find(a => a.id === txForm.accountId);
+      const isSourceBo = isBoAccount(sourceAccObj);
+      const isSourceMf = isMutualFundAccount(sourceAccObj);
+      const linkedRentId = inheritedSukukRentTxId || (editingTx?.sukukTxId) || (state.sukuks?.some(s => s.installments?.some(i => i.linkedIncomeTxId === editingTx?.id)) ? editingTx?.id : undefined);
+      const linkedFdrProfitId = inheritedFdrProfitTxId || (editingTx?.fdrTxId) || (state.fdrs?.some(f => f.transactions?.some(t => t.linkedIncomeTxId === editingTx?.id || t.id === editingTx?.id)) ? editingTx?.id : undefined);
+      const linkedOnlineInstId = inheritedOnlineInstallmentTxId || (editingTx?.onlineTxId) || (state.onlineInvestments?.some(o => o.installments?.some(i => i.linkedIncomeTxId === editingTx?.id)) ? editingTx?.id : undefined);
+      const linkedMfDividendId = inheritedMfGroupId || (editingTx?.mfTxId) || (state.mutualFunds?.some(f => f.transactions?.some(t => t.linkedIeGroupId === editingTx?.id || t.id === editingTx?.id)) ? editingTx?.id : undefined);
+      const isMfDividendForm = txForm.type === 'Income' && (
+        isSourceMf ||
+        !!linkedMfDividendId ||
+        (txForm.category?.toLowerCase().includes('finance') && txForm.subCategory?.toLowerCase().includes('dividend') && isSourceMf)
+      );
+
+      const isCapitalGainForm = txForm.category === 'Capital Gain' || txForm.subCategory === 'Stocks Capital Gain';
+      const isDseDividendForm = txForm.type === 'Income' && !isCapitalGainForm && !isMfDividendForm && !isSourceMf && !linkedRentId && !linkedFdrProfitId && !linkedOnlineInstId && (
+        isSourceBo ||
+        !!inheritedDseTxId ||
+        !!editingTx?.dseTxId
+      );
+      const isDseSellForm = txForm.type === 'Income' && isCapitalGainForm && !isMfDividendForm && (isSourceBo || !!inheritedDseTxId || !!editingTx?.dseTxId);
+      const isDseChargeForm = txForm.type === 'Expense' && !isSourceMf && !linkedMfDividendId && (
+        isSourceBo ||
+        !!inheritedDseTxId ||
+        !!editingTx?.dseTxId
+      );
+      const isDseSyncCandidate = (isDseDividendForm || isDseSellForm || isDseChargeForm) && !isMfDividendForm && !isSourceMf;
+      const linkedDseId = inheritedDseTxId || editingTx?.dseTxId || (isDseSyncCandidate && syncToDse ? crypto.randomUUID() : undefined);
+      const isMfAccountDividendForm = isMfDividendForm && isMutualFundAccount(accounts.find(a => a.id === txForm.accountId));
+      const txId = editingTx ? editingTx.id : (linkedMfDividendId || linkedDseId || linkedRentId || linkedFdrProfitId || linkedOnlineInstId || crypto.randomUUID());
+      const isSukukRentForm = txForm.type === 'Income' && (
+        txForm.subCategory?.toLowerCase() === 'sukuk rent' ||
+        (txForm.category?.toLowerCase().includes('finance') && txForm.subCategory?.toLowerCase().includes('sukuk')) ||
+        !!linkedRentId
+      );
+      const isFdrProfitForm = txForm.type === 'Income' && (
+        txForm.subCategory?.toLowerCase().includes('fdr') ||
+        txForm.subCategory?.toLowerCase().includes('provisional profit') ||
+        txForm.subCategory?.toLowerCase().includes('fixed deposit') ||
+        (txForm.category?.toLowerCase().includes('finance') && (txForm.subCategory?.toLowerCase().includes('profit') || txForm.subCategory?.toLowerCase().includes('interest'))) ||
+        !!linkedFdrProfitId
+      );
+      const isFdrChargeForm = txForm.type === 'Expense' && (
+        !!linkedFdrProfitId ||
+        (
+          isFdrAccount(accounts.find(a => a.id === txForm.accountId)) &&
+          txForm.category === 'Other Expense' &&
+          (txForm.subCategory === 'Account Related Fees' || txForm.subCategory === 'Other Bank Charges' || txForm.subCategory?.toLowerCase().includes('tds'))
+        )
+      );
+      const isOnlineInstallmentForm = txForm.type === 'Income' && (
+        !!linkedOnlineInstId
+      );
+
+      if (!editingTx) {
+        if (isMfAccountDividendForm) targetMfDividendNavTxId = txId;
+        else if (isSukukRentForm) targetSukukRentNavTxId = txId;
+        else if (isFdrProfitForm) targetFdrProfitNavTxId = txId;
+        else if (isFdrChargeForm) targetFdrChargeNavTxId = txId;
+      }
+
       const transactionData: IncomeExpenseTransaction = {
-        id: editingTx ? editingTx.id : crypto.randomUUID(),
+        id: txId,
         date: txForm.date,
         amount: parsedAmount,
         type: txForm.type as any,
         accountId: txForm.accountId,
         category: txForm.category,
         subCategory: txForm.subCategory,
-        description: txForm.description
+        description: txForm.description,
+        mfTxId: isMfDividendForm ? (linkedMfDividendId || txId) : (editingTx?.mfTxId || undefined),
+        dseTxId: (isDseSyncCandidate && syncToDse) ? linkedDseId : (editingTx?.dseTxId || undefined),
+        autoSyncDse: isDseSyncCandidate ? syncToDse : undefined,
+        sukukTxId: linkedRentId || undefined,
+        fdrTxId: linkedFdrProfitId || undefined,
+        onlineTxId: isOnlineInstallmentForm ? (linkedOnlineInstId || txId) : undefined
       };
+
+      if (isDseSyncCandidate && syncToDse && linkedDseId) {
+        syncDseDepositTransaction({
+          id: linkedDseId,
+          date: txForm.date,
+          amount: parsedAmount,
+          notes: txForm.description || (isDseSellForm ? 'Stocks P&L' : isDseChargeForm ? 'BO Account Charge' : 'Cash Dividend'),
+          transactionType: isDseSellForm ? 'Sell' : isDseChargeForm ? 'Charge' : 'Dividend',
+          isDelete: false
+        });
+      } else if (editingTx?.dseTxId && (!isDseSyncCandidate || !syncToDse)) {
+        syncDseDepositTransaction({
+          id: editingTx.dseTxId,
+          date: '',
+          amount: 0,
+          notes: '',
+          isDelete: true
+        });
+      }
+
+      if (isMfDividendForm) {
+        syncMutualFundDividendIncome(linkedMfDividendId || txId, {
+          date: txForm.date,
+          amount: parsedAmount,
+          description: txForm.description,
+          type: txForm.type,
+          category: txForm.category,
+          subCategory: txForm.subCategory
+        });
+      } else if (editingTx && (editingTx.mfTxId || state.mutualFunds?.some(f => f.transactions?.some(t => t.linkedIeGroupId === editingTx.id || t.id === editingTx.id)))) {
+        syncMutualFundDividendIncome(editingTx.mfTxId || editingTx.id, null);
+      }
+
+      if (isSukukRentForm) {
+        syncSukukRentIncome(linkedRentId || txId, {
+          date: txForm.date,
+          amount: parsedAmount,
+          description: txForm.description,
+          type: txForm.type,
+          category: txForm.category,
+          subCategory: txForm.subCategory
+        });
+      } else if (editingTx && (editingTx.subCategory?.toLowerCase() === 'sukuk rent' || editingTx.sukukTxId || state.sukuks?.some(s => s.installments?.some(i => i.linkedIncomeTxId === editingTx.id)))) {
+        syncSukukRentIncome(editingTx.sukukTxId || editingTx.id, null);
+      }
+
+      if (isFdrProfitForm || isFdrChargeForm) {
+        syncFdrProfitIncome(linkedFdrProfitId || txId, {
+          date: txForm.date,
+          amount: parsedAmount,
+          description: txForm.description,
+          type: txForm.type,
+          category: txForm.category,
+          subCategory: txForm.subCategory
+        });
+      } else if (editingTx && (editingTx.subCategory?.toLowerCase().includes('fdr') || editingTx.subCategory?.toLowerCase().includes('provisional profit') || editingTx.subCategory === 'Account Related Fees' || editingTx.subCategory === 'Other Bank Charges' || editingTx.fdrTxId || state.fdrs?.some(f => f.transactions?.some(t => t.linkedIncomeTxId === editingTx.id || t.id === editingTx.id)))) {
+        syncFdrProfitIncome(editingTx.fdrTxId || editingTx.id, null);
+      }
+
+      if (isOnlineInstallmentForm) {
+        syncOnlineInstallmentIncome(linkedOnlineInstId || txId, {
+          date: txForm.date,
+          amount: parsedAmount,
+          description: txForm.description,
+          type: txForm.type,
+          category: txForm.category,
+          subCategory: txForm.subCategory
+        });
+      } else if (editingTx && (editingTx.onlineTxId || state.onlineInvestments?.some(o => o.installments?.some(i => i.linkedIncomeTxId === editingTx.id || (editingTx.transferGroupId && i.linkedIncomeTxId === editingTx.transferGroupId))))) {
+        syncOnlineInstallmentIncome(editingTx.onlineTxId || editingTx.transferGroupId || editingTx.id, null);
+      }
 
       updateState(prev => {
         const currentList = prev.incomeExpenseTransactions || [];
@@ -1829,36 +3198,132 @@ export function IncomeExpenseModule({
           incomeExpenseTransactions: [transactionData, ...filteredList]
         };
       });
+
+      const returnModule = activeTab ? ('income-expense-' + activeTab) : 'income-expense-transactions';
+
+      if (txForm.type === 'Income' && onNavigateToModule) {
+        if (isFromExternalModuleRef.current) {
+          isFromExternalModuleRef.current = false;
+        } else if (!editingTx) {
+          if (targetMfDividendNavTxId) {
+            onNavigateToModule('mutual-funds', {
+              date: txForm.date,
+              amount: parsedAmount,
+              description: txForm.description,
+              targetModule: 'mutual-funds-dividend',
+              linkedTxId: targetMfDividendNavTxId,
+              returnModule
+            });
+          } else if (targetSukukRentNavTxId) {
+            onNavigateToModule('sukuk', {
+              date: txForm.date,
+              amount: parsedAmount,
+              type: 'Income',
+              category: txForm.category,
+              subCategory: txForm.subCategory,
+              targetModule: 'sukuk-rent',
+              description: txForm.description,
+              linkedTxId: targetSukukRentNavTxId,
+              returnModule
+            });
+          } else if (targetFdrProfitNavTxId) {
+            onNavigateToModule('fdrs', {
+              date: txForm.date,
+              amount: parsedAmount,
+              type: 'Income',
+              category: txForm.category,
+              subCategory: txForm.subCategory,
+              targetModule: 'fdr-profit',
+              description: txForm.description,
+              linkedTxId: targetFdrProfitNavTxId,
+              returnModule
+            });
+          }
+        } else if (isMfDividendForm && linkedMfDividendId) {
+          onNavigateToModule('mutual-funds', {
+            date: txForm.date,
+            amount: parsedAmount,
+            description: txForm.description,
+            targetModule: 'mutual-funds-dividend',
+            linkedTxId: linkedMfDividendId,
+            returnModule
+          });
+        }
+      } else if (txForm.type === 'Expense' && onNavigateToModule) {
+        if (isFromExternalModuleRef.current) {
+          isFromExternalModuleRef.current = false;
+        } else if (!editingTx && targetFdrChargeNavTxId) {
+          onNavigateToModule('fdrs', {
+            date: txForm.date,
+            amount: parsedAmount,
+            type: 'Expense',
+            category: txForm.category,
+            subCategory: txForm.subCategory,
+            targetModule: 'fdr-charge',
+            description: txForm.description,
+            linkedTxId: targetFdrChargeNavTxId,
+            returnModule
+          });
+        }
+      }
     }
 
     setIsTxModalOpen(false);
     setEditingTx(null);
+    setInheritedSukukRentTxId(undefined);
+    setInheritedFdrProfitTxId(undefined);
+    setInheritedOnlineInstallmentTxId(undefined);
 
     // Auto-open target module modal if transfer was to Mutual Fund, Online Investment, or Sukuk
     if (txForm.type === 'Transfer' && onNavigateToModule) {
       if (isFromExternalModuleRef.current) {
         isFromExternalModuleRef.current = false;
       } else {
+        const returnModule = activeTab ? ('income-expense-' + activeTab) : 'income-expense-transactions';
         const toAccountObj = accounts.find(a => a.id === txForm.toAccountId);
         const transferDate = txForm.date;
         const parsedToAmountVal = parseFloat(txForm.toAmount || txForm.amount);
         const transferAmount = (!isNaN(parsedToAmountVal) && parsedToAmountVal > 0) ? parsedToAmountVal : parsedAmount;
 
         if (isMutualFundAccount(toAccountObj)) {
-          onNavigateToModule('mutual-funds', { date: transferDate, amount: transferAmount, description: txForm.description });
+          onNavigateToModule('mutual-funds', { date: transferDate, amount: transferAmount, description: txForm.description, linkedTxId: cascadeGroupId, returnModule });
         } else if (isOnlineInvestmentAccount(toAccountObj)) {
-          onNavigateToModule('online', { date: transferDate, amount: transferAmount, description: txForm.description });
+          onNavigateToModule('online', { date: transferDate, amount: transferAmount, description: txForm.description, linkedTxId: cascadeGroupId, returnModule });
         } else if (isSukukAccount(toAccountObj)) {
-          onNavigateToModule('sukuk', { date: transferDate, amount: transferAmount, description: txForm.description });
+          onNavigateToModule('sukuk', { date: transferDate, amount: transferAmount, description: txForm.description, linkedTxId: cascadeGroupId, returnModule });
         } else if (isFdrAccount(toAccountObj)) {
-          onNavigateToModule('fdrs', { date: transferDate, amount: transferAmount, description: txForm.description });
+          onNavigateToModule('fdrs', { date: transferDate, amount: transferAmount, description: txForm.description, returnModule });
         }
+      }
+    } else {
+      if (isFromExternalModuleRef.current) {
+        isFromExternalModuleRef.current = false;
       }
     }
   };
 
   // Edit Transaction Trigger
   const handleEditTx = (tx: IncomeExpenseTransaction) => {
+    setInheritedDseTxId(undefined);
+    setInheritedSukukRentTxId(tx.sukukTxId || (state.sukuks?.some(s => s.installments?.some(i => i.linkedIncomeTxId === tx.id)) ? tx.id : undefined));
+    setInheritedFdrProfitTxId(tx.fdrTxId || (state.fdrs?.some(f => f.transactions?.some(t => t.linkedIncomeTxId === tx.id || t.id === tx.id)) ? tx.id : undefined));
+    setInheritedOnlineInstallmentTxId(
+      tx.onlineTxId ||
+      (state.onlineInvestments?.some(o => o.installments?.some(i => i.linkedIncomeTxId === tx.id || (tx.transferGroupId && i.linkedIncomeTxId === tx.transferGroupId)))
+        ? (tx.onlineTxId || tx.id || tx.transferGroupId)
+        : undefined)
+    );
+    setInheritedOnlineGroupId(
+      (tx.transferGroupId && state.onlineInvestments?.some(o => o.linkedIeGroupId === tx.transferGroupId))
+        ? tx.transferGroupId
+        : (state.onlineInvestments?.some(o => o.linkedIeGroupId === tx.id || o.id === tx.id) ? (tx.transferGroupId || tx.id) : undefined)
+    );
+    setInheritedMfGroupId(
+      tx.mfTxId ||
+      ((tx.transferGroupId && state.mutualFunds?.some(f => f.transactions?.some(t => t.linkedIeGroupId === tx.transferGroupId)))
+        ? tx.transferGroupId
+        : (state.mutualFunds?.some(f => f.transactions?.some(t => t.linkedIeGroupId === tx.id || t.id === tx.id)) ? tx.id : undefined))
+    );
     if (tx.id.startsWith('init-bal-')) {
       const acc = accounts.find(a => a.id === tx.accountId);
       if (acc) {
@@ -1887,10 +3352,19 @@ export function IncomeExpenseModule({
       });
     } else {
       const targetAcc = accounts.find(a => a.id === (tx.toAccountId || accounts.find(a => a.id !== tx.accountId)?.id || tx.accountId));
-      if (tx.type === 'Transfer' && isBoAccount(targetAcc)) {
+      const sourceAcc = accounts.find(a => a.id === tx.accountId);
+      const isMfAccountOrTx = isMutualFundAccount(sourceAcc) || isMutualFundAccount(targetAcc) || !!tx.mfTxId || (tx.transferGroupId && state.mutualFunds?.some(f => f.transactions?.some(t => t.linkedIeGroupId === tx.transferGroupId)));
+      const isBoTransfer = !isMfAccountOrTx && (isBoAccount(targetAcc) || isBoAccount(sourceAcc));
+      const isBoIncome = !isMfAccountOrTx && tx.type === 'Income' && (isBoAccount(sourceAcc) || !!tx.dseTxId);
+      if (tx.type === 'Transfer' && isBoTransfer) {
+        setSyncToDse(tx.autoSyncDse !== undefined ? tx.autoSyncDse : true);
+      } else if (isBoIncome) {
         setSyncToDse(tx.autoSyncDse !== undefined ? tx.autoSyncDse : true);
       } else {
-        setSyncToDse(isBoAccount(targetAcc));
+        setSyncToDse(false);
+      }
+      if (tx.dseTxId && !isMfAccountOrTx) {
+        setInheritedDseTxId(tx.dseTxId);
       }
       setTxForm({
         date: tx.date,
@@ -1933,10 +3407,18 @@ export function IncomeExpenseModule({
       ? transactions.find(t => t.transferGroupId === tx.transferGroupId && t.dseTxId)
       : null;
     const targetDseId = tx?.dseTxId || linkedTx?.dseTxId;
+    const isMfDividendLink = !!tx && !!(
+      tx.mfTxId ||
+      (tx.type === 'Income' && tx.subCategory?.toLowerCase().includes('dividend')) ||
+      state.mutualFunds?.some(f => f.transactions?.some(t2 => t2.linkedIeGroupId === tx.id || t2.id === tx.id || (tx.mfTxId && t2.linkedIeGroupId === tx.mfTxId)))
+    );
+    const isSevereDelete = !!isLinkedTransfer || isMfDividendLink;
 
     const msg = isLinkedTransfer 
-      ? 'Delete this transfer? Both the source and destination ledger entries will be deleted.'
-      : 'Delete this transaction? This action is immediate and permanent.';
+      ? 'You are about to delete a linked transfer transaction. This will permanently delete BOTH the source and destination ledger entries across your accounts.'
+      : isMfDividendLink
+        ? 'You are about to delete a Mutual Fund dividend entry. This will permanently delete this ledger entry AND the linked dividend transaction in the Mutual Funds module.'
+        : 'Delete this transaction? This action is immediate and permanent.';
 
     runConfirm(
       msg,
@@ -1950,6 +3432,23 @@ export function IncomeExpenseModule({
             isDelete: true
           });
         }
+        if (isLinkedTransfer && tx?.transferGroupId) {
+          syncMutualFundLinkedTransfer(tx.transferGroupId, null);
+          syncSukukLinkedTransfer(tx.transferGroupId, null);
+          syncOnlineLinkedTransfer(tx.transferGroupId, null);
+        }
+        if (tx && (tx.mfTxId || (tx.type === 'Income' && tx.subCategory?.toLowerCase().includes('dividend')) || state.mutualFunds?.some(f => f.transactions?.some(t => t.linkedIeGroupId === tx.id || t.id === tx.id || (tx.mfTxId && t.linkedIeGroupId === tx.mfTxId))))) {
+          syncMutualFundDividendIncome(tx.mfTxId || tx.id, null);
+        }
+        if (tx && (tx.sukukTxId || tx.subCategory?.toLowerCase() === 'sukuk rent' || state.sukuks?.some(s => s.installments?.some(i => i.linkedIncomeTxId === tx.id)))) {
+          syncSukukRentIncome(tx.sukukTxId || tx.id, null);
+        }
+        if (tx && (tx.fdrTxId || tx.subCategory?.toLowerCase().includes('fdr') || tx.subCategory?.toLowerCase().includes('provisional profit') || state.fdrs?.some(f => f.transactions?.some(t => t.linkedIncomeTxId === tx.id || t.id === tx.id)))) {
+          syncFdrProfitIncome(tx.fdrTxId || tx.id, null);
+        }
+        if (tx && (tx.onlineTxId || state.onlineInvestments?.some(o => o.installments?.some(i => i.linkedIncomeTxId === tx.id || i.linkedIncomeTxId === tx.onlineTxId || (tx.transferGroupId && i.linkedIncomeTxId === tx.transferGroupId))))) {
+          syncOnlineInstallmentIncome(tx.onlineTxId || tx.id || tx.transferGroupId!, null);
+        }
         updateState(prev => {
           const currentList = prev.incomeExpenseTransactions || [];
           const updatedList = isLinkedTransfer
@@ -1961,21 +3460,38 @@ export function IncomeExpenseModule({
           };
         });
       },
-      'Delete Transaction'
+      isLinkedTransfer
+        ? 'Severe Warning: Deleting Linked Transfer'
+        : isMfDividendLink
+          ? 'Severe Warning: Deleting Linked Mutual Fund Dividend'
+          : 'Confirm Delete',
+      {
+        variant: isSevereDelete ? 'severe' : 'danger',
+        confirmLabel: isLinkedTransfer ? 'Delete Both Transfer Records' : (isMfDividendLink ? 'Delete Dividend & Linked Record' : 'Delete'),
+        details: isLinkedTransfer ? [
+          `Source account entry (${accounts.find(a => a.id === tx?.accountId)?.name || 'Source'})`,
+          `Destination account entry (${accounts.find(a => a.id === tx?.toAccountId)?.name || 'Destination'})`,
+          'All linked external investment and DSE ledger synchronization records'
+        ] : isMfDividendLink ? [
+          'This Income & Expense ledger entry',
+          'The linked dividend transaction in the Mutual Funds module'
+        ] : undefined
+      }
     );
   };
-
   // Batch Delete Transactions
   const handleBatchDelete = () => {
     if (selectedTxIds.length === 0) return;
 
     const currentList = state.incomeExpenseTransactions || [];
-    const hasLinkedTransfers = currentList.some(
+    const linkedCount = currentList.filter(
       t => selectedTxIds.includes(t.id) && t.transferGroupId
-    );
+    ).length;
+    const hasInitBal = selectedTxIds.some(id => id.startsWith('init-bal-'));
+    const isSevere = linkedCount > 0 || hasInitBal;
 
-    const msg = hasLinkedTransfers
-      ? `Are you sure you want to delete ${selectedTxIds.length} selected transactions? This includes transfer(s); both the source and destination ledger entries of any selected transfers will be deleted.`
+    const msg = isSevere
+      ? `Your selection contains ${linkedCount > 0 ? `${linkedCount} linked transfer record(s)` : ''}${hasInitBal ? (linkedCount > 0 ? ' and ' : '') + 'account initial balance(s)' : ''}. Deleting will permanently remove both source and destination records for all linked transfers and reset account balances.`
       : `Are you sure you want to delete ${selectedTxIds.length} selected transactions? This action is immediate and permanent.`;
 
     runConfirm(
@@ -1984,6 +3500,11 @@ export function IncomeExpenseModule({
         const initialBalAccIds = selectedTxIds
           .filter(id => id.startsWith('init-bal-'))
           .map(id => id.replace('init-bal-', ''));
+
+        const nonInitSelectedIdsForMf = selectedTxIds.filter(id => !id.startsWith('init-bal-'));
+        const selectedGroupIdsForMf = transactions
+          .filter(t => nonInitSelectedIdsForMf.includes(t.id) && t.transferGroupId)
+          .map(t => t.transferGroupId as string);
 
         updateState(prev => {
           let accs = prev.incomeExpenseAccounts || [];
@@ -2005,6 +3526,22 @@ export function IncomeExpenseModule({
             syncDseDepositTransaction({ id: dseId, date: '', amount: 0, notes: '', isDelete: true });
           });
 
+          nonInitSelectedIds.forEach(selectedId => {
+            const t = transactionsList.find(tx => tx.id === selectedId);
+            if (t && (t.mfTxId || (t.type === 'Income' && t.subCategory?.toLowerCase().includes('dividend')) || prev.mutualFunds?.some(f => f.transactions?.some(inst => inst.linkedIeGroupId === t.id || inst.id === t.id || (t.mfTxId && inst.linkedIeGroupId === t.mfTxId))))) {
+              syncMutualFundDividendIncome(t.mfTxId || t.id, null);
+            }
+            if (t && (t.sukukTxId || t.subCategory?.toLowerCase() === 'sukuk rent' || prev.sukuks?.some(s => s.installments?.some(i => i.linkedIncomeTxId === t.id)))) {
+              syncSukukRentIncome(t.sukukTxId || t.id, null);
+            }
+            if (t && (t.fdrTxId || t.subCategory?.toLowerCase().includes('fdr') || t.subCategory?.toLowerCase().includes('provisional profit') || prev.fdrs?.some(f => f.transactions?.some(inst => inst.linkedIncomeTxId === t.id || inst.id === t.id)))) {
+              syncFdrProfitIncome(t.fdrTxId || t.id, null);
+            }
+            if (t && (t.onlineTxId || prev.onlineInvestments?.some(o => o.installments?.some(i => i.linkedIncomeTxId === t.id || i.linkedIncomeTxId === t.onlineTxId || (t.transferGroupId && i.linkedIncomeTxId === t.transferGroupId))))) {
+              syncOnlineInstallmentIncome(t.onlineTxId || t.id || t.transferGroupId!, null);
+            }
+          });
+
           const updatedList = transactionsList.filter(t => {
             if (nonInitSelectedIds.includes(t.id)) return false;
             if (t.transferGroupId && selectedGroupIds.includes(t.transferGroupId)) return false;
@@ -2017,9 +3554,26 @@ export function IncomeExpenseModule({
             incomeExpenseTransactions: updatedList
           };
         });
+
+        selectedGroupIdsForMf.forEach(groupId => {
+          syncMutualFundLinkedTransfer(groupId, null);
+          syncSukukLinkedTransfer(groupId, null);
+          syncOnlineLinkedTransfer(groupId, null);
+        });
+
         setSelectedTxIds([]);
       },
-      'Confirm Batch Delete'
+      isSevere ? 'Severe Warning: Batch Delete Contains Linked Transfers' : 'Confirm Batch Delete',
+      {
+        variant: isSevere ? 'severe' : 'danger',
+        confirmLabel: isSevere ? `Delete All (${selectedTxIds.length} Records & Linked Legs)` : 'Delete Selected',
+        details: isSevere ? [
+          `${selectedTxIds.length} Total Selected Records`,
+          linkedCount > 0 ? `${linkedCount} Linked Transfer Leg(s) (will remove corresponding pair in other accounts)` : null,
+          hasInitBal ? 'Starting initial balance reset for selected account(s)' : null,
+          'All associated balance reconciliations across accounts'
+        ] : undefined
+      }
     );
   };
 
@@ -2186,33 +3740,6 @@ export function IncomeExpenseModule({
       },
       'Delete Category'
     );
-  };
-
-  // Conversion rates save
-  const [usdRateForm, setUsdRateForm] = useState(String(USD_rate));
-  const [lydRateForm, setLydRateForm] = useState(String(LYD_rate));
-
-  useEffect(() => {
-    setUsdRateForm(String(USD_rate));
-    setLydRateForm(String(LYD_rate));
-  }, [USD_rate, LYD_rate]);
-
-  const handleSaveRates = (e: React.FormEvent) => {
-    e.preventDefault();
-    const usdVal = parseFloat(usdRateForm);
-    const lydVal = parseFloat(lydRateForm);
-    if (isNaN(usdVal) || isNaN(lydVal) || usdVal <= 0 || lydVal <= 0) {
-      runAlert('Please enter valid numeric conversion rates.', 'Invalid Rates');
-      return;
-    }
-    updateState(prev => ({
-      ...prev,
-      conversionRates: {
-        USD_to_BDT: usdVal,
-        LYD_to_BDT: lydVal
-      }
-    }));
-    runAlert('Conversion rates updated successfully!', 'Rates Updated');
   };
 
   // ─── Export / Import ───────────────────────────────────────────────────────
@@ -2527,18 +4054,87 @@ export function IncomeExpenseModule({
   const [txAccFilter, setTxAccFilter] = useState<string>('All');
   const [txCatFilter, setTxCatFilter] = useState<string>('All');
   const [selectedTxIds, setSelectedTxIds] = useState<string[]>([]);
+  const [lastSelectedTxId, setLastSelectedTxId] = useState<string | null>(null);
 
   useEffect(() => {
     setSelectedTxIds([]);
+    setLastSelectedTxId(null);
   }, [txSearch, txTypeFilter, txAccFilter, txCatFilter, activeTab]);
 
   const filteredTabTransactions = useMemo(() => {
+    const query = txSearch.trim().toLowerCase();
+    const cleanNumQuery = query.replace(/[৳$,\s+]/g, '').replace(/^ld\s*/i, '').replace(/^bdt\s*/i, '').replace(/^tk\.?\s*/i, '');
+
     return filteredTransactions.filter(t => {
       const acc = accounts.find(a => a.id === t.accountId);
-      const matchesSearch = t.description?.toLowerCase().includes(txSearch.toLowerCase()) || 
-                            t.category?.toLowerCase().includes(txSearch.toLowerCase()) ||
-                            t.subCategory?.toLowerCase().includes(txSearch.toLowerCase()) ||
-                            acc?.name.toLowerCase().includes(txSearch.toLowerCase());
+      const toAcc = t.toAccountId ? accounts.find(a => a.id === t.toAccountId) : null;
+      const mult = acc?.currency === 'USD' ? USD_rate : acc?.currency === 'LYD' ? LYD_rate : 1;
+      const toMult = toAcc?.currency === 'USD' ? USD_rate : toAcc?.currency === 'LYD' ? LYD_rate : 1;
+
+      // Text fields match
+      const textMatches = !query || 
+        t.description?.toLowerCase().includes(query) || 
+        t.category?.toLowerCase().includes(query) ||
+        t.subCategory?.toLowerCase().includes(query) ||
+        acc?.name.toLowerCase().includes(query) ||
+        (toAcc?.name ? toAcc.name.toLowerCase().includes(query) : false);
+
+      // Amount match
+      let amountMatches = false;
+      if (query) {
+        const absAmt = Math.abs(t.amount);
+        const bdtAmt = Math.abs(t.amount * mult);
+        const formattedRaw = formatCurrency(t.amount, acc?.currency || 'BDT').toLowerCase();
+        const formattedAbs = formatCurrency(absAmt, acc?.currency || 'BDT').toLowerCase();
+        const formattedBdt = formatBDT(bdtAmt).toLowerCase();
+        const localeStr = absAmt.toLocaleString('en-US').toLowerCase();
+        const fixed2Str = absAmt.toFixed(2);
+        const rawStr = t.amount.toString();
+        const absStr = absAmt.toString();
+
+        if (
+          rawStr.includes(query) ||
+          absStr.includes(query) ||
+          formattedRaw.includes(query) ||
+          formattedAbs.includes(query) ||
+          formattedBdt.includes(query) ||
+          localeStr.includes(query) ||
+          fixed2Str.includes(query)
+        ) {
+          amountMatches = true;
+        }
+
+        if (!amountMatches && cleanNumQuery) {
+          const bdtRoundedStr = Math.round(bdtAmt).toString();
+          const bdtFixed2Str = bdtAmt.toFixed(2);
+
+          if (
+            rawStr.includes(cleanNumQuery) ||
+            absStr.includes(cleanNumQuery) ||
+            fixed2Str.includes(cleanNumQuery) ||
+            bdtRoundedStr.includes(cleanNumQuery) ||
+            bdtFixed2Str.includes(cleanNumQuery)
+          ) {
+            amountMatches = true;
+          }
+
+          // Also check transfer toAmount
+          if (!amountMatches && t.toAmount !== undefined && t.toAmount !== null) {
+            const absToAmt = Math.abs(t.toAmount);
+            const toBdtAmt = Math.abs(t.toAmount * toMult);
+            if (
+              absToAmt.toString().includes(cleanNumQuery) ||
+              absToAmt.toFixed(2).includes(cleanNumQuery) ||
+              Math.round(toBdtAmt).toString().includes(cleanNumQuery) ||
+              toBdtAmt.toFixed(2).includes(cleanNumQuery)
+            ) {
+              amountMatches = true;
+            }
+          }
+        }
+      }
+
+      const matchesSearch = textMatches || amountMatches;
       
       const matchesType = txTypeFilter === 'All' || t.type === txTypeFilter;
       const matchesAcc = txAccFilter === 'All' || t.accountId === txAccFilter || (t.type === 'Transfer' && t.toAccountId === txAccFilter);
@@ -2546,7 +4142,7 @@ export function IncomeExpenseModule({
 
       return matchesSearch && matchesType && matchesAcc && matchesCat;
     });
-  }, [filteredTransactions, txSearch, txTypeFilter, txAccFilter, txCatFilter, accounts]);
+  }, [filteredTransactions, txSearch, txTypeFilter, txAccFilter, txCatFilter, accounts, USD_rate, LYD_rate]);
 
   // ─── Group Transactions by Date for Mobile & Web List ─────────────────────
   const groupedTabTransactions = useMemo(() => {
@@ -2588,6 +4184,32 @@ export function IncomeExpenseModule({
     const sortedDates = Array.from(map.keys()).sort((a, b) => b.localeCompare(a));
     return sortedDates.map(d => map.get(d)!);
   }, [filteredTabTransactions, accounts, USD_rate, LYD_rate]);
+
+  const displayedTabTransactions = useMemo(() => {
+    return groupedTabTransactions.flatMap(g => g.transactions);
+  }, [groupedTabTransactions]);
+
+  const toggleSelectTx = (id: string, e?: React.MouseEvent) => {
+    if (e?.shiftKey && lastSelectedTxId && lastSelectedTxId !== id) {
+      const lastIdx = displayedTabTransactions.findIndex(t => t.id === lastSelectedTxId);
+      const currIdx = displayedTabTransactions.findIndex(t => t.id === id);
+      if (lastIdx !== -1 && currIdx !== -1) {
+        const start = Math.min(lastIdx, currIdx);
+        const end = Math.max(lastIdx, currIdx);
+        const rangeIds = displayedTabTransactions.slice(start, end + 1).map(t => t.id);
+        setSelectedTxIds(prev => Array.from(new Set([...prev, ...rangeIds])));
+        setLastSelectedTxId(id);
+        return;
+      }
+    }
+
+    setLastSelectedTxId(id);
+    if (selectedTxIds.includes(id)) {
+      setSelectedTxIds(prev => prev.filter(i => i !== id));
+    } else {
+      setSelectedTxIds(prev => [...prev, id]);
+    }
+  };
 
   const { runningBalances, dateBalances } = useMemo(() => {
     if (txAccFilter === 'All') return { runningBalances: {}, dateBalances: {} };
@@ -2658,34 +4280,101 @@ export function IncomeExpenseModule({
 
   // Analytics Metrics
   const analyticsData = useMemo(() => {
-    const monthsMap: Record<string, { month: string; income: number; expense: number }> = {};
-    
-    filteredTransactions.forEach(t => {
-      const dateObj = new Date(t.date);
-      if (isNaN(dateObj.getTime())) return;
-      const monthKey = `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}`;
-      const acc = accounts.find(a => a.id === t.accountId);
-      const mult = acc?.currency === 'USD' ? USD_rate : acc?.currency === 'LYD' ? LYD_rate : 1;
-      const bdtAmount = t.amount * mult;
+    // 1. Generate all consecutive months from flowStartStr to flowEndStr
+    const [sY, sM] = flowStartStr.split('-').map(Number);
+    const [eY, eM] = flowEndStr.split('-').map(Number);
+    const monthsMap: Record<string, { month: string; label: string; date: Date; income: number; expense: number; investment: number }> = {};
+
+    let curY = sY;
+    let curM = sM;
+    while (curY < eY || (curY === eY && curM <= eM)) {
+      const monthKey = `${curY}-${String(curM).padStart(2, '0')}`;
+      const d = new Date(curY, curM - 1, 1);
+      const label = d.toLocaleString('default', { month: 'short', year: '2-digit' });
+      monthsMap[monthKey] = {
+        month: monthKey,
+        label,
+        date: d,
+        income: 0,
+        expense: 0,
+        investment: 0
+      };
+      curM++;
+      if (curM > 12) {
+        curM = 1;
+        curY++;
+      }
+    }
+
+    // 2. Filter transactions strictly within [flowStartStr, flowEndStr]
+    allTransactions.forEach(t => {
+      if (!t.date || t.date < flowStartStr || t.date > flowEndStr) return;
+      // Never treat initial balances as monthly income
+      if (t.category === 'Initial Balance' || t.id.startsWith('init-bal-')) return;
+      // Never treat loans as income/expense
+      if (t.type === 'Loan' || t.category === 'Loan') return;
+
+      const dateParts = t.date.split('-');
+      if (dateParts.length < 2) return;
+      const monthKey = `${dateParts[0]}-${dateParts[1].padStart(2, '0')}`;
 
       if (!monthsMap[monthKey]) {
+        const [yNum, mNum] = [Number(dateParts[0]), Number(dateParts[1])];
+        const d = new Date(yNum, mNum - 1, 1);
         monthsMap[monthKey] = {
           month: monthKey,
+          label: d.toLocaleString('default', { month: 'short', year: '2-digit' }),
+          date: d,
           income: 0,
-          expense: 0
+          expense: 0,
+          investment: 0
         };
       }
+
+      const acc = accounts.find(a => a.id === t.accountId);
+      const mult = acc?.currency === 'USD' ? USD_rate : acc?.currency === 'LYD' ? LYD_rate : 1;
+      const bdtAmount = (t.amount || 0) * mult;
+
       if (t.type === 'Income') {
         monthsMap[monthKey].income += bdtAmount;
-      } else {
-        monthsMap[monthKey].expense += bdtAmount;
+      } else if (t.type === 'Expense') {
+        if (t.category === 'Investment' || t.subCategory === 'Investment') {
+          monthsMap[monthKey].investment += bdtAmount;
+        } else {
+          monthsMap[monthKey].expense += bdtAmount;
+        }
+      } else if (t.type === 'Transfer') {
+        if (t.transferType) {
+          // Two-entry transfer model: evaluate the incoming 'to' transaction
+          if (t.transferType === 'to') {
+            const destAcc = accounts.find(a => a.id === t.accountId);
+            if (isInvestmentAccount(destAcc, accounts)) {
+              const fromTx = t.transferGroupId
+                ? allTransactions.find(other => other.transferGroupId === t.transferGroupId && other.transferType === 'from')
+                : null;
+              const sourceAcc = fromTx ? accounts.find(a => a.id === fromTx.accountId) : null;
+              if (!isInvestmentAccount(sourceAcc, accounts)) {
+                monthsMap[monthKey].investment += bdtAmount;
+              }
+            }
+          }
+        } else {
+          // Legacy single-entry model
+          const destAcc = accounts.find(a => a.id === t.toAccountId);
+          const sourceAcc = accounts.find(a => a.id === t.accountId);
+          if (isInvestmentAccount(destAcc, accounts) && !isInvestmentAccount(sourceAcc, accounts)) {
+            const toMult = destAcc?.currency === 'USD' ? USD_rate : destAcc?.currency === 'LYD' ? LYD_rate : 1;
+            const targetBdt = (t.toAmount !== undefined ? t.toAmount : t.amount) * toMult;
+            monthsMap[monthKey].investment += targetBdt;
+          }
+        }
       }
     });
 
     return Object.values(monthsMap).sort((a, b) => a.month.localeCompare(b.month));
-  }, [filteredTransactions, accounts, USD_rate, LYD_rate]);
+  }, [allTransactions, accounts, USD_rate, LYD_rate, flowStartStr, flowEndStr]);
 
-  const expensePieData = useMemo(() => {
+  const expenseSlices = useMemo<AnalyticsDonutSlice[]>(() => {
     const catsMap: Record<string, number> = {};
     filteredTransactions.filter(t => t.type === 'Expense').forEach(t => {
       const acc = accounts.find(a => a.id === t.accountId);
@@ -2693,12 +4382,20 @@ export function IncomeExpenseModule({
       catsMap[t.category] = (catsMap[t.category] || 0) + (t.amount * mult);
     });
 
-    return Object.entries(catsMap)
-      .map(([name, value]) => ({ name, value }))
+    const entries = Object.entries(catsMap)
+      .filter(([_, value]) => value > 0)
+      .map(([name, value]) => ({ id: name, name, value }))
       .sort((a, b) => b.value - a.value);
+
+    const total = entries.reduce((sum, e) => sum + e.value, 0);
+    return entries.map((e, index) => ({
+      ...e,
+      pct: total > 0 ? e.value / total : 0,
+      color: HOLDING_COLORS[index % HOLDING_COLORS.length],
+    }));
   }, [filteredTransactions, accounts, USD_rate, LYD_rate]);
 
-  const incomePieData = useMemo(() => {
+  const incomeSlices = useMemo<AnalyticsDonutSlice[]>(() => {
     const catsMap: Record<string, number> = {};
     filteredTransactions.filter(t => t.type === 'Income').forEach(t => {
       const acc = accounts.find(a => a.id === t.accountId);
@@ -2706,10 +4403,44 @@ export function IncomeExpenseModule({
       catsMap[t.category] = (catsMap[t.category] || 0) + (t.amount * mult);
     });
 
-    return Object.entries(catsMap)
-      .map(([name, value]) => ({ name, value }))
+    const entries = Object.entries(catsMap)
+      .filter(([_, value]) => value > 0)
+      .map(([name, value]) => ({ id: name, name, value }))
       .sort((a, b) => b.value - a.value);
+
+    const total = entries.reduce((sum, e) => sum + e.value, 0);
+    return entries.map((e, index) => ({
+      ...e,
+      pct: total > 0 ? e.value / total : 0,
+      color: HOLDING_COLORS[index % HOLDING_COLORS.length],
+    }));
   }, [filteredTransactions, accounts, USD_rate, LYD_rate]);
+
+  const assetSlices = useMemo<AnalyticsDonutSlice[]>(() => {
+    // Accounts holding actual assets (either leaf accounts or top-level accounts without children)
+    const targetAccounts = accounts.filter(a => !a.isParent || !accounts.some(c => c.parentId === a.id));
+
+    const entries = targetAccounts
+      .map(acc => {
+        const bal = accountBalances[acc.id] || 0;
+        const mult = acc.currency === 'USD' ? USD_rate : acc.currency === 'LYD' ? LYD_rate : 1;
+        const bdtValue = bal * mult;
+        return {
+          id: acc.id,
+          name: acc.name,
+          value: bdtValue,
+        };
+      })
+      .filter(e => e.value > 0)
+      .sort((a, b) => b.value - a.value);
+
+    const total = entries.reduce((sum, e) => sum + e.value, 0);
+    return entries.map((e, index) => ({
+      ...e,
+      pct: total > 0 ? e.value / total : 0,
+      color: HOLDING_COLORS[index % HOLDING_COLORS.length],
+    }));
+  }, [accounts, accountBalances, USD_rate, LYD_rate]);
 
   const categoryActivity = useMemo(() => {
     const results: Array<{
@@ -2927,7 +4658,7 @@ export function IncomeExpenseModule({
                     <p className="text-body-sm font-bold text-white uppercase tracking-wider">Total Balance in BDT</p>
                   </div>
                   <h3 className="text-heading font-bold text-teal-400 mb-4 tracking-tight font-display tabular-nums truncate">
-                    {formatBDT(totalConvertedBDT)}
+                    {formatBDT(totalBDT + (totalLYD * LYD_rate) + (totalUSD * USD_rate))}
                   </h3>
                   {(totalCurrentBorrowedBDT > 0 || totalCurrentLentBDT > 0) && (
                     <div className="flex flex-wrap items-center gap-2 mb-3 mt-[-6px]">
@@ -2968,7 +4699,7 @@ export function IncomeExpenseModule({
                     <p className="text-body-sm font-bold text-white uppercase tracking-wider">Balance in BDT</p>
                   </div>
                   <h3 className="text-heading font-bold text-teal-400 mb-4 tracking-tight font-display tabular-nums truncate">
-                    {formatBDT(totalBDT - loanStatsByCurrency.BDT.borrowed + loanStatsByCurrency.BDT.lent)}
+                    {formatBDT(totalBDT)}
                   </h3>
                   {(loanStatsByCurrency.BDT.borrowed > 0 || loanStatsByCurrency.BDT.lent > 0) && (
                     <div className="flex flex-wrap items-center gap-2 mb-3 mt-[-6px]">
@@ -3009,7 +4740,7 @@ export function IncomeExpenseModule({
                     <p className="text-body-sm font-bold text-white uppercase tracking-wider">Balance in LYD</p>
                   </div>
                   <h3 className="text-heading font-bold text-amber-400 mb-4 tracking-tight font-display tabular-nums truncate">
-                    {formatCurrency(totalLYD - loanStatsByCurrency.LYD.borrowed + loanStatsByCurrency.LYD.lent, 'LYD')}
+                    {formatCurrency(totalLYD, 'LYD')}
                   </h3>
                   {(loanStatsByCurrency.LYD.borrowed > 0 || loanStatsByCurrency.LYD.lent > 0) && (
                     <div className="flex flex-wrap items-center gap-2 mb-3 mt-[-6px]">
@@ -3050,7 +4781,7 @@ export function IncomeExpenseModule({
                     <p className="text-body-sm font-bold text-white uppercase tracking-wider">Balance in USD</p>
                   </div>
                   <h3 className="text-heading font-bold text-sky-400 mb-4 tracking-tight font-display tabular-nums truncate">
-                    {formatCurrency(totalUSD - loanStatsByCurrency.USD.borrowed + loanStatsByCurrency.USD.lent, 'USD')}
+                    {formatCurrency(totalUSD, 'USD')}
                   </h3>
                   {(loanStatsByCurrency.USD.borrowed > 0 || loanStatsByCurrency.USD.lent > 0) && (
                     <div className="flex flex-wrap items-center gap-2 mb-3 mt-[-6px]">
@@ -3151,9 +4882,10 @@ export function IncomeExpenseModule({
                         >
                           <div className="flex flex-col justify-between w-full h-full min-h-[35px]">
                             <div className="flex justify-between items-start gap-1">
-                              <div className="flex items-center gap-1.5 min-w-0">
-                                <span className="font-semibold text-[11px] text-slate-200 truncate pr-1" title={acc.name}>{acc.name}</span>
-                                <ChevronDown size={11} className={cn("text-slate-400 transition-transform duration-200 shrink-0", isExpanded ? "rotate-180" : "")} />
+                              <div className="flex items-center gap-1.5 min-w-0 pr-1">
+                                <AccountBadgeIcon account={acc} size="xs" />
+                                <span className="font-semibold text-[11px] text-slate-200 truncate" title={acc.name}>{acc.name}</span>
+                                <ChevronDown size={11} className={cn("text-slate-400 transition-transform duration-200 shrink-0 ml-auto", isExpanded ? "rotate-180" : "")} />
                               </div>
                             </div>
                             <div className="flex justify-between items-end mt-1">
@@ -3169,7 +4901,10 @@ export function IncomeExpenseModule({
                                   const childBalance = accountBalances[child.id] || 0;
                                   return (
                                     <div key={child.id} className={cn("p-2 bg-slate-950/60 border rounded-lg flex flex-col justify-between hover:bg-slate-900 transition-all min-h-[50px]", child.currency === 'BDT' ? "border-teal-500/10 hover:border-teal-400/30" : child.currency === 'LYD' ? "border-amber-500/10 hover:border-amber-400/30" : "border-sky-500/10 hover:border-sky-400/30")}>
-                                      <span className="font-semibold text-[11px] text-slate-300 truncate" title={child.name}>{child.name}</span>
+                                      <div className="flex items-center gap-1.5 min-w-0">
+                                        <AccountBadgeIcon account={child} size="xs" />
+                                        <span className="font-semibold text-[11px] text-slate-300 truncate" title={child.name}>{child.name}</span>
+                                      </div>
                                       <div className={cn("font-bold text-[11px] tabular-nums mt-1", child.currency === 'BDT' ? "text-teal-400" : child.currency === 'USD' ? "text-sky-400" : "text-amber-400")}>
                                         {formatCurrency(childBalance, child.currency)}
                                       </div>
@@ -3188,7 +4923,10 @@ export function IncomeExpenseModule({
 
                     return (
                       <div key={acc.id} className={cn("p-2.5 bg-slate-950 border rounded-lg flex flex-col justify-between hover:bg-slate-900 transition-all group relative min-h-[54px]", acc.currency === 'BDT' ? "border-teal-500/13 hover:border-teal-400/30" : acc.currency === 'LYD' ? "border-amber-500/13 hover:border-amber-400/30" : "border-sky-500/13 hover:border-sky-400/30")}>
-                        <div className="font-semibold text-[11px] text-slate-200 truncate pr-4" title={acc.name}>{acc.name}</div>
+                        <div className="flex items-center gap-1.5 min-w-0 pr-1">
+                          <AccountBadgeIcon account={acc} size="xs" />
+                          <div className="font-semibold text-[11px] text-slate-200 truncate" title={acc.name}>{acc.name}</div>
+                        </div>
                         <div className={cn("font-bold text-[11px] tabular-nums mt-1", acc.currency === 'BDT' ? "text-teal-400" : acc.currency === 'USD' ? "text-sky-400" : "text-amber-400")}>
                           {formatCurrency(balance, acc.currency)}
                         </div>
@@ -3250,7 +4988,7 @@ export function IncomeExpenseModule({
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
-                  <h4 className="text-subheading font-bold text-white uppercase tracking-tight">Period Category Activity</h4>
+                  <h4 className="text-subheading font-bold text-white uppercase tracking-tight">Activity by Category</h4>
                   <p className="text-[10px] text-slate-500 font-bold uppercase mt-1">Activity and distributions by categories and sub-ledgers (in BDT)</p>
                 </div>
                 <div className="flex items-center gap-1.5 px-1 self-start sm:self-auto shrink-0">
@@ -3274,6 +5012,7 @@ export function IncomeExpenseModule({
                 {sortedCategories.map(cat => {
                   const hasSubcats = cat.subCategories.filter(sub => sub.value > 0).length > 0;
                   const isExpanded = !!expandedCategories[cat.id] && hasSubcats;
+                  const catVisual = getCategoryVisual(cat.name, cat.type);
                   return (
                     <div
                       key={cat.id}
@@ -3296,6 +5035,9 @@ export function IncomeExpenseModule({
                       <div className="flex flex-col justify-between w-full h-full min-h-[35px]">
                         <div className="flex justify-between items-start gap-1">
                           <div className="flex items-center gap-1.5 min-w-0">
+                            <div className={cn("w-5 h-5 rounded-md flex items-center justify-center shrink-0 border", catVisual.bg)}>
+                              <catVisual.Icon size={11} />
+                            </div>
                             <span className="font-semibold text-[11px] text-slate-200 truncate pr-1" title={cat.name}>{cat.name}</span>
                             {hasSubcats && <ChevronDown size={11} className={cn("text-slate-400 transition-transform duration-200 shrink-0", isExpanded ? "rotate-180" : "")} />}
                           </div>
@@ -3386,10 +5128,13 @@ export function IncomeExpenseModule({
                               {t.type}
                             </span>
                           </td>
-                          <td className="py-3 font-semibold max-w-[120px] truncate">
-                            <span className={getCurrencyColorClass(acc?.currency)}>
-                              {acc ? acc.name : 'Unknown'}
-                            </span>
+                          <td className="py-3 font-semibold max-w-[140px] truncate">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <AccountBadgeIcon account={acc} size="xs" />
+                              <span className={cn("truncate", getCurrencyColorClass(acc?.currency))}>
+                                {acc ? acc.name : 'Unknown'}
+                              </span>
+                            </div>
                           </td>
                           <td className="py-3 text-slate-300">
                             {t.type === 'Transfer' ? (
@@ -3426,7 +5171,7 @@ export function IncomeExpenseModule({
                               )
                             ) : (
                               <span className={txDetail.className}>
-                                {txDetail.prefix}{formatCurrency(t.amount, acc?.currency || 'BDT')}
+                                {txDetail.prefix}{formatCurrency(Math.abs(t.amount), acc?.currency || 'BDT')}
                               </span>
                             )}
                           </td>
@@ -3445,7 +5190,7 @@ export function IncomeExpenseModule({
                                 </div>
                               )
                             ) : (
-                              <span>{txDetail.prefix}{formatBDT(t.amount * mult)}</span>
+                              <span>{txDetail.prefix}{formatBDT(Math.abs(t.amount) * mult)}</span>
                             )}
                           </td>
                         </tr>
@@ -3466,6 +5211,17 @@ export function IncomeExpenseModule({
       // ─── TRANSACTION LEDGER MODULE ────────────────────────────────────────
       case 'transactions': {
         const selectedAcc = txAccFilter !== 'All' ? accounts.find(a => a.id === txAccFilter) : null;
+        const isTypeOrCatFiltered = txTypeFilter !== 'All' || txCatFilter !== 'All';
+
+        const periodTotalFiltered = filteredTabTransactions.reduce((sum, t) => {
+          if (txAccFilter !== 'All' && selectedAcc) {
+            return sum + Math.abs(t.amount);
+          }
+          const acc = accounts.find(a => a.id === t.accountId);
+          const mult = acc?.currency === 'USD' ? USD_rate : acc?.currency === 'LYD' ? LYD_rate : 1;
+          return sum + (Math.abs(t.amount) * mult);
+        }, 0);
+
         return (
           <div className="space-y-6 sm:space-y-8">
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 gap-4 flex flex-col md:flex-row items-center justify-between">
@@ -3515,16 +5271,28 @@ export function IncomeExpenseModule({
 
             <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-hidden">
               <div className="px-5 sm:px-6 py-4 border-b border-slate-800 flex justify-between items-center bg-slate-950/30">
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center gap-3">
                   <h4 className="text-subheading font-bold text-white uppercase tracking-tight">Transactions ({filteredTabTransactions.length})</h4>
                   {txAccFilter !== 'All' && selectedAcc && (
-                    <span className="hidden sm:inline-flex px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-teal-500/10 text-teal-400 border border-teal-500/20">
-                      {selectedAcc.name}
+                    <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-slate-800 text-white border border-slate-700 shadow-sm">
+                      <AccountBadgeIcon account={selectedAcc} size="xs" />
+                      <span>{selectedAcc.name}</span>
+                    </span>
+                  )}
+                  {isTypeOrCatFiltered && (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-teal-500/10 text-teal-400 border border-teal-500/20 shadow-sm">
+                      <span className="text-slate-400 uppercase text-[9px]">Total:</span>
+                      <span className="tabular-nums">
+                        {txAccFilter !== 'All' && selectedAcc
+                          ? formatCurrency(periodTotalFiltered, selectedAcc.currency)
+                          : formatBDT(periodTotalFiltered)}
+                      </span>
                     </span>
                   )}
                 </div>
                 <Button size="sm" onClick={() => {
                   setEditingTx(null);
+                  setInheritedDseTxId(undefined);
                   const initialToAcc = accounts[1] || accounts[0];
                   setSyncToDse(isBoAccount(initialToAcc));
                   setTxForm({ 
@@ -3566,8 +5334,11 @@ export function IncomeExpenseModule({
                 <div className="col-span-4 flex items-center gap-3">
                   <Checkbox 
                     label="" 
-                    checked={selectedTxIds.length === filteredTabTransactions.length && filteredTabTransactions.length > 0} 
-                    onChange={(checked) => setSelectedTxIds(checked ? filteredTabTransactions.map(t => t.id) : [])} 
+                    checked={selectedTxIds.length === displayedTabTransactions.length && displayedTabTransactions.length > 0} 
+                    onChange={(checked) => {
+                      setSelectedTxIds(checked ? displayedTabTransactions.map(t => t.id) : []);
+                      setLastSelectedTxId(null);
+                    }} 
                   />
                   <span>CATEGORY / SUB</span>
                 </div>
@@ -3582,6 +5353,15 @@ export function IncomeExpenseModule({
               {/* Date Grouped Transactions */}
               <div className="divide-y divide-slate-800/60">
                 {groupedTabTransactions.map(group => {
+                  const groupTotal = group.transactions.reduce((sum, t) => {
+                    if (txAccFilter !== 'All' && selectedAcc) {
+                      return sum + Math.abs(t.amount);
+                    }
+                    const acc = accounts.find(a => a.id === t.accountId);
+                    const mult = acc?.currency === 'USD' ? USD_rate : acc?.currency === 'LYD' ? LYD_rate : 1;
+                    return sum + (Math.abs(t.amount) * mult);
+                  }, 0);
+
                   return (
                     <div key={group.date} className="w-full">
                       {/* Date Group Header */}
@@ -3595,7 +5375,16 @@ export function IncomeExpenseModule({
                           </span>
                         </div>
                         <div className="text-right">
-                          {txAccFilter !== 'All' && selectedAcc ? (
+                          {isTypeOrCatFiltered ? (
+                            <div className="flex items-center gap-1.5 justify-end">
+                              <span className="text-[10px] sm:text-xs font-bold text-slate-500 uppercase tracking-wider">Total:</span>
+                              <span className={cn("text-xs sm:text-sm font-extrabold tabular-nums", txAccFilter !== 'All' && selectedAcc ? getCurrencyColorClass(selectedAcc.currency) : "text-teal-400")}>
+                                {txAccFilter !== 'All' && selectedAcc
+                                  ? formatCurrency(groupTotal, selectedAcc.currency)
+                                  : formatBDT(groupTotal)}
+                              </span>
+                            </div>
+                          ) : txAccFilter !== 'All' && selectedAcc ? (
                             <div className="flex items-center gap-1.5 justify-end">
                               <span className="text-[10px] sm:text-xs font-bold text-slate-500 uppercase tracking-wider">Bal:</span>
                               <span className={cn("text-xs sm:text-sm font-extrabold tabular-nums", getCurrencyColorClass(selectedAcc.currency))}>
@@ -3614,14 +5403,25 @@ export function IncomeExpenseModule({
 
                       {/* Transaction Rows in this Date Group */}
                       <div className="divide-y divide-slate-800/30">
-                        {group.transactions.map(t => {
+                        {group.transactions.map((t, idx) => {
                           const acc = accounts.find(a => a.id === t.accountId);
                           const mult = acc?.currency === 'USD' ? USD_rate : acc?.currency === 'LYD' ? LYD_rate : 1;
                           const toAcc = t.toAccountId ? accounts.find(a => a.id === t.toAccountId) : null;
                           const toMult = toAcc?.currency === 'USD' ? USD_rate : toAcc?.currency === 'LYD' ? LYD_rate : 1;
                           const txDetail = getTxColorAndPrefix(t);
                           const isSelected = selectedTxIds.includes(t.id);
-                          const visual = getCategoryVisual(t.category, t.type, t.subCategory);
+                          const visual = getCategoryVisual(t.category, t.type);
+
+                          const prevTx = idx > 0 ? group.transactions[idx - 1] : null;
+                          const nextTx = idx < group.transactions.length - 1 ? group.transactions[idx + 1] : null;
+
+                          const isTransfer = t.type === 'Transfer';
+                          const isTransferFrom = isTransfer && t.transferType === 'from';
+                          const isTransferTo = isTransfer && t.transferType === 'to';
+
+                          const isPairFrom = isTransferFrom && nextTx && nextTx.type === 'Transfer' && nextTx.transferType === 'to';
+                          const isPairTo = isTransferTo && prevTx && prevTx.type === 'Transfer' && prevTx.transferType === 'from';
+                          const prevWasPairTo = prevTx && prevTx.type === 'Transfer' && prevTx.transferType === 'to';
 
                           // Category & Sub Category label construction
                           let categoryTitle = t.category || '—';
@@ -3630,10 +5430,10 @@ export function IncomeExpenseModule({
                           if (t.type === 'Transfer') {
                             if (t.transferType === 'from') {
                               categoryTitle = 'Transfer Out';
-                              subCategoryLabel = toAcc ? `To: ${toAcc.name}` : 'Funds Transfer';
+                              subCategoryLabel = acc ? `From: ${acc.name}` : 'Funds Transfer';
                             } else if (t.transferType === 'to') {
                               categoryTitle = 'Transfer In';
-                              subCategoryLabel = acc ? `From: ${acc.name}` : 'Funds Transfer';
+                              subCategoryLabel = acc ? `To: ${acc.name}` : 'Funds Transfer';
                             } else {
                               categoryTitle = acc && toAcc ? `${acc.name} → ${toAcc.name}` : 'Funds Transfer';
                               subCategoryLabel = 'Account Transfer';
@@ -3643,13 +5443,31 @@ export function IncomeExpenseModule({
                             subCategoryLabel = acc ? acc.name : 'Starting Balance';
                           }
 
+                          // Border logic:
+                          // - Transfer Out in pair: top border, no bottom border
+                          // - Transfer In in pair: no top border (no dividing line between pair), bottom border
+                          // - Standalone transfer: top and bottom borders
+                          // - Row after a transfer pair: clear top border from divide-y to prevent double border
+                          const borderClass = isPairFrom
+                            ? "!border-t-2 !border-sky-500/40 border-b-0"
+                            : isPairTo
+                            ? "!border-t-0 !border-b-2 !border-sky-500/40"
+                            : isTransfer
+                            ? "!border-t-2 !border-b-2 !border-sky-500/40"
+                            : prevWasPairTo
+                            ? "!border-t-0"
+                            : "";
+
                           return (
                             <div 
                               key={t.id} 
                               onClick={() => handleEditTx(t)}
                               className={cn(
                                 "group px-4 sm:px-6 py-3.5 flex flex-col md:grid md:grid-cols-12 md:gap-4 md:items-center hover:bg-slate-800/25 transition-colors cursor-pointer select-none",
-                                isSelected && "bg-teal-400/10 hover:bg-teal-400/15"
+                                isSelected
+                                  ? "bg-teal-400/10 hover:bg-teal-400/15"
+                                  : isTransfer && "bg-sky-500/[0.07] hover:bg-sky-500/[0.12]",
+                                borderClass
                               )}
                             >
                               {/* 1st Column: Icon + Category + Sub Category (Web & Mobile) */}
@@ -3662,7 +5480,7 @@ export function IncomeExpenseModule({
                                     <Checkbox 
                                       label="" 
                                       checked={isSelected} 
-                                      onChange={(checked) => setSelectedTxIds(prev => checked ? [...prev, t.id] : prev.filter(id => id !== t.id))} 
+                                      onChange={(_, e) => toggleSelectTx(t.id, e)} 
                                     />
                                   </div>
 
@@ -3671,20 +5489,17 @@ export function IncomeExpenseModule({
                                     <visual.Icon size={18} />
                                   </div>
 
-                                  {/* Category & Sub Category Text */}
+                                  {/* Category & Sub Category Text with Account Badge in Subtitle */}
                                   <div className="min-w-0 flex-1 flex flex-col justify-center">
                                     <span className="font-extrabold text-white text-sm leading-snug truncate">
                                       {categoryTitle}
                                     </span>
-                                    {subCategoryLabel ? (
-                                      <span className="text-[11px] font-medium text-slate-400 leading-snug mt-0.5 truncate">
-                                        {subCategoryLabel}
+                                    <div className="flex items-center gap-1.5 min-w-0 mt-0.5">
+                                      <AccountBadgeIcon account={acc} size="xs" />
+                                      <span className="text-[11px] font-medium text-slate-400 leading-snug truncate">
+                                        {subCategoryLabel || '—'}
                                       </span>
-                                    ) : (
-                                      <span className="text-[11px] font-medium text-slate-600 leading-snug mt-0.5">
-                                        —
-                                      </span>
-                                    )}
+                                    </div>
                                   </div>
                                 </div>
 
@@ -3700,10 +5515,10 @@ export function IncomeExpenseModule({
                                         <span>{formatCurrency(t.amount, acc?.currency || 'BDT')}</span>
                                       )
                                     ) : (
-                                      <span>{txDetail.prefix}{formatCurrency(t.amount, acc?.currency || 'BDT')}</span>
+                                      <span>{txDetail.prefix}{formatCurrency(Math.abs(t.amount), acc?.currency || 'BDT')}</span>
                                     )}
                                   </div>
-                                  {/* Mobile: Show Account Name instead of BDT */}
+                                  {/* Mobile: Show Account Name */}
                                   <div className="text-[11px] text-slate-400 font-medium leading-tight mt-0.5 truncate max-w-[120px]">
                                     {acc ? acc.name : 'Unknown Account'}
                                   </div>
@@ -3741,7 +5556,7 @@ export function IncomeExpenseModule({
                                       </div>
                                     )
                                   ) : (
-                                    <span>{txDetail.prefix}{formatCurrency(t.amount, acc?.currency || 'BDT')}</span>
+                                    <span>{txDetail.prefix}{formatCurrency(Math.abs(t.amount), acc?.currency || 'BDT')}</span>
                                   )}
                                 </div>
 
@@ -3756,9 +5571,9 @@ export function IncomeExpenseModule({
                                       ) : (
                                         <span className="text-slate-500">{formatBDT(t.amount * mult)} BDT</span>
                                       )
-                                    ) : (
-                                      <span>{txDetail.prefix}{formatBDT(t.amount * mult)}</span>
-                                    )}
+                            ) : (
+                              <span>{txDetail.prefix}{formatBDT(Math.abs(t.amount) * mult)}</span>
+                            )}
                                   </div>
                                 )}
                               </div>
@@ -3797,6 +5612,22 @@ export function IncomeExpenseModule({
                   </div>
                 )}
               </div>
+
+              {/* Total During Selected Period Footer */}
+              {isTypeOrCatFiltered && (
+                <div className="px-5 sm:px-6 py-4 bg-slate-950/70 border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs sm:text-sm font-bold text-slate-300">
+                      Total During {selectedPeriodLabel}:
+                    </span>
+                  </div>
+                  <div className={cn("text-sm sm:text-base font-extrabold tabular-nums", txAccFilter !== 'All' && selectedAcc ? getCurrencyColorClass(selectedAcc.currency) : "text-teal-400")}>
+                    {txAccFilter !== 'All' && selectedAcc
+                      ? formatCurrency(periodTotalFiltered, selectedAcc.currency)
+                      : formatBDT(periodTotalFiltered)}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         );
@@ -3804,104 +5635,479 @@ export function IncomeExpenseModule({
 
       // ─── ANALYTICS MODULE ────────────────────────────────────────────────
       case 'analytics': {
+        const FLOW_TEAL = '#2dd4bf';
+        const FLOW_ROSE = '#f43f5e';
+        const FLOW_PINK = '#f472b6';
+
+        const ANALYTICS_FLOW_LEGENDS = [
+          { key: 'income', label: 'Income', color: FLOW_TEAL },
+          { key: 'expense', label: 'Expense', color: FLOW_ROSE },
+          { key: 'investment', label: 'Investment', color: FLOW_PINK },
+        ];
+
         return (
           <div className="space-y-6 sm:space-y-8">
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
-              <h4 className="text-subheading font-bold text-white uppercase tracking-tight mb-6">Income vs Expense flow (BDT value)</h4>
-              <div className="h-72 w-full">
-                {analyticsData.length > 0 ? (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <ComposedChart data={analyticsData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-                      <XAxis dataKey="month" stroke="#64748b" tick={{ fontSize: 9, fontWeight: 'bold' }} strokeWidth={0.5} />
-                      <YAxis stroke="#64748b" tickFormatter={(v) => `৳${formatNumber(v)}`} tick={{ fontSize: 9, fontWeight: 'bold' }} strokeWidth={0.5} />
-                      <Tooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '8px' }} labelStyle={{ color: '#fff', fontSize: '10px', fontWeight: 'bold' }} itemStyle={{ fontSize: '10px', fontWeight: 'bold' }} formatter={(val: number) => [formatBDT(val), '']} />
-                      <Bar dataKey="income" name="INCOME" fill="#2dd4bf" radius={[4, 4, 0, 0]} maxBarSize={40} />
-                      <Bar dataKey="expense" name="EXPENSE" fill="#f43f5e" radius={[4, 4, 0, 0]} maxBarSize={40} />
-                      <Line type="monotone" dataKey="income" name="Income trend" stroke="#06b6d4" strokeWidth={1.5} dot={false} />
-                    </ComposedChart>
-                  </ResponsiveContainer>
-                ) : (
-                  <div className="h-full flex items-center justify-center text-slate-500 uppercase italic text-label">Insufficient ledger history in selected date range</div>
-                )}
-              </div>
-            </div>
+            {/* ── Row 1: Income vs Expense flow (50%) + Asset by Accounts (50%) ── */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8 w-full items-stretch">
+              {/* ── Income vs Expense flow (BDT value) Chart ── */}
+              {(() => {
+                const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 lg:gap-8">
-              <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 flex flex-col justify-between">
-                <div>
-                  <h5 className="text-label text-slate-400 font-extrabold uppercase tracking-widest mb-6">Expenses by Category (BDT)</h5>
-                  <div className="h-56 w-full relative mb-4">
-                    {expensePieData.length > 0 ? (
-                      <ResponsiveContainer width="100%" height="100%">
-                        <RechartsPieChart>
-                          <Pie data={expensePieData} cx="50%" cy="50%" innerRadius={50} outerRadius={80} paddingAngle={3} dataKey="value">
-                            {expensePieData.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}
-                          </Pie>
-                          <Tooltip formatter={(val: number) => formatBDT(val)} />
-                        </RechartsPieChart>
-                      </ResponsiveContainer>
-                    ) : (
-                      <div className="h-full flex items-center justify-center text-slate-500 uppercase italic text-label">No expenses logged</div>
+                // Apply monthly or cumulative aggregation
+                const baseFlowData = (() => {
+                  if (flowView === 'cumulative') {
+                    let runInc = 0;
+                    let runExp = 0;
+                    let runInv = 0;
+                    return analyticsData.map(g => {
+                      runInc += g.income;
+                      runExp += g.expense;
+                      runInv += g.investment;
+                      return {
+                        ...g,
+                        income: runInc,
+                        expense: runExp,
+                        investment: runInv,
+                      };
+                    });
+                  }
+                  return analyticsData;
+                })();
+
+                // Build visible chart data with hidden series zeroed out
+                const visibleChartData = baseFlowData.map(g => ({
+                  ...g,
+                  income: hiddenFlowSeries.has('income') ? undefined : g.income,
+                  expense: hiddenFlowSeries.has('expense') ? undefined : g.expense,
+                  investment: hiddenFlowSeries.has('investment') ? undefined : g.investment,
+                  _income: g.income,
+                  _expense: g.expense,
+                  _investment: g.investment,
+                }));
+
+                const allVals = baseFlowData.flatMap(g => [
+                  hiddenFlowSeries.has('income') ? 0 : g.income,
+                  (hiddenFlowSeries.has('expense') ? 0 : g.expense) + (hiddenFlowSeries.has('investment') ? 0 : g.investment),
+                ]);
+                const dataMax = Math.max(...allVals, 0);
+                const step = dataMax > 1000000 ? 200000 : dataMax > 500000 ? 100000 : dataMax > 200000 ? 50000 : dataMax > 50000 ? 20000 : 10000;
+                const maxTick = Math.ceil(dataMax / step) * step + step;
+                const analyticsTicks: number[] = [];
+                for (let v = 0; v <= maxTick; v += step) {
+                  analyticsTicks.push(v);
+                }
+
+                const fmtAxis = (val: number) => {
+                  const abs = Math.abs(val);
+                  const sign = val < 0 ? '-' : '';
+                  if (abs === 0) return '0';
+                  if (abs >= 1000000) {
+                    const m = abs / 1000000;
+                    return `${sign}${m % 1 === 0 ? m.toFixed(0) : m.toFixed(1)}M`;
+                  }
+                  if (abs >= 1000) {
+                    const k = abs / 1000;
+                    return `${sign}${k % 1 === 0 ? k.toFixed(0) : k.toFixed(1)}K`;
+                  }
+                  return `${sign}${abs.toFixed(0)}`;
+                };
+
+                return (
+                  <Card className="p-4 sm:p-6 overflow-hidden bg-slate-900 border-slate-800 rounded-2xl shadow-xl h-full flex flex-col justify-between">
+                    {/* Title Header matching DSE Tracker */}
+                    <div className="mb-5 pb-3 border-b border-slate-800 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <BarChart2 className="text-teal-400" size={20} />
+                        <h3 className="text-subheading font-bold text-white uppercase tracking-wider">
+                          Income vs Expense (BDT)
+                        </h3>
+                      </div>
+                    </div>
+
+                  {/* View Selector: Monthly/Cumulative & Range Selector */}
+                  <div className="flex flex-wrap items-center justify-center gap-3 mb-4">
+                    <div className="flex items-center h-9 bg-slate-950 rounded-xl border border-slate-800 overflow-hidden">
+                      <button
+                        onClick={() => setFlowView('monthly')}
+                        className={cn(
+                          "flex items-center gap-2 px-4 h-full text-[10px] font-bold uppercase transition-all tracking-wider border-r border-slate-800",
+                          flowView === 'monthly' ? "bg-teal-400 text-slate-950" : "text-slate-400 hover:text-white hover:bg-slate-800/60"
+                        )}
+                      >
+                        <span className={cn("w-2 h-2 rounded-full shrink-0", flowView === 'monthly' ? "bg-slate-950/60" : "bg-teal-400")} />
+                        Monthly
+                      </button>
+                      <button
+                        onClick={() => setFlowView('cumulative')}
+                        className={cn(
+                          "flex items-center gap-2 px-4 h-full text-[10px] font-bold uppercase transition-all tracking-wider",
+                          flowView === 'cumulative' ? "bg-teal-400 text-slate-950" : "text-slate-400 hover:text-white hover:bg-slate-800/60"
+                        )}
+                      >
+                        <span className={cn("w-2 h-2 rounded-full shrink-0", flowView === 'cumulative' ? "bg-slate-950/60" : "bg-teal-400")} />
+                        Cumulative
+                      </button>
+                    </div>
+
+                    {/* Range Selector with < and > */}
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => navigateFlowDate(-1)}
+                        className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                        title="Previous period"
+                      >
+                        <ChevronLeft size={14} />
+                      </button>
+
+                      <div className="relative">
+                        <button
+                          onClick={() => setIsFlowRangeOpen(!isFlowRangeOpen)}
+                          className="flex items-center gap-3 bg-slate-950 border border-slate-800 rounded-xl px-4 h-9 text-[10px] font-bold text-slate-300 hover:text-white transition-all uppercase tracking-widest"
+                        >
+                          <Calendar size={14} className="text-teal-400" />
+                          {flowRange === 'last6m' ? 'Last 6M' : flowRange === 'last12m' ? 'Last 12M' : flowRange === 'fiscal' ? 'Fiscal' : 'Custom'}
+                          <ChevronDown size={14} className={cn("transition-transform", isFlowRangeOpen ? "rotate-180" : "")} />
+                        </button>
+                        {isFlowRangeOpen && (
+                          <>
+                            <div className="fixed inset-0 z-40" onClick={() => setIsFlowRangeOpen(false)} />
+                            <div className="absolute left-0 mt-2 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95">
+                              {['last6m', 'last12m', 'fiscal', 'custom'].map(id => (
+                                <button
+                                  key={id}
+                                  onClick={() => {
+                                    setFlowRange(id as any);
+                                    setFlowMonthOffset(0);
+                                    setFlowFiscalOffset(0);
+                                    setIsFlowRangeOpen(false);
+                                  }}
+                                  className={cn(
+                                    "w-full text-left px-3 py-2 text-[10px] font-bold rounded-lg transition-colors uppercase tracking-widest",
+                                    flowRange === id ? "bg-teal-400 text-slate-950" : "text-slate-300 hover:bg-slate-800"
+                                  )}
+                                >
+                                  {id === 'last6m' ? 'Last 6M' : id === 'last12m' ? 'Last 12M' : id === 'fiscal' ? 'Fiscal' : 'Custom'}
+                                </button>
+                              ))}
+                            </div>
+                          </>
+                        )}
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => navigateFlowDate(1)}
+                        className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                        title="Next period"
+                      >
+                        <ChevronRight size={14} />
+                      </button>
+                    </div>
+
+                    {flowRange === 'custom' && (
+                      <div className="flex items-center gap-2 animate-in fade-in slide-in-from-left-2">
+                        <input
+                          type="date"
+                          value={flowCustomDates.start}
+                          onChange={e => setFlowCustomDates(p => ({ ...p, start: e.target.value }))}
+                          className="bg-slate-950 border border-slate-800 rounded-xl px-3 h-8 text-[10px] font-bold text-white outline-none focus:border-teal-400/50"
+                        />
+                        <span className="text-slate-600 text-[10px] font-bold">TO</span>
+                        <input
+                          type="date"
+                          value={flowCustomDates.end}
+                          onChange={e => setFlowCustomDates(p => ({ ...p, end: e.target.value }))}
+                          className="bg-slate-950 border border-slate-800 rounded-xl px-3 h-8 text-[10px] font-bold text-white outline-none focus:border-teal-400/50"
+                        />
+                      </div>
                     )}
                   </div>
-                </div>
-                <div className="max-h-[160px] overflow-y-auto space-y-2 pr-1">
-                  {expensePieData.map((d, index) => (
-                    <div key={d.name} className="flex justify-between items-center text-[10px] font-bold">
-                      <div className="flex items-center gap-2 text-slate-300"><span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: COLORS[index % COLORS.length] }} /><span>{d.name}</span></div>
-                      <span className="text-white font-extrabold tabular-nums">{formatBDT(d.value)}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
 
-              <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 flex flex-col justify-between">
-                <div>
-                  <h5 className="text-label text-slate-400 font-extrabold uppercase tracking-widest mb-6">Incomes by Category (BDT)</h5>
-                  <div className="h-56 w-full relative mb-4">
-                    {incomePieData.length > 0 ? (
-                      <ResponsiveContainer width="100%" height="100%">
-                        <RechartsPieChart>
-                          <Pie data={incomePieData} cx="50%" cy="50%" innerRadius={50} outerRadius={80} paddingAngle={3} dataKey="value">
-                            {incomePieData.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}
-                          </Pie>
-                          <Tooltip formatter={(val: number) => formatBDT(val)} />
-                        </RechartsPieChart>
-                      </ResponsiveContainer>
-                    ) : (
-                      <div className="h-full flex items-center justify-center text-slate-500 uppercase italic text-label">No income logged</div>
-                    )}
-                  </div>
-                </div>
-                <div className="max-h-[160px] overflow-y-auto space-y-2 pr-1">
-                  {incomePieData.map((d, index) => (
-                    <div key={d.name} className="flex justify-between items-center text-[10px] font-bold">
-                      <div className="flex items-center gap-2 text-slate-300"><span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: COLORS[index % COLORS.length] }} /><span>{d.name}</span></div>
-                      <span className="text-white font-extrabold tabular-nums">{formatBDT(d.value)}</span>
+                  {visibleChartData.length === 0 ? (
+                    <div className="py-20 text-center text-slate-500 uppercase italic text-[11px] font-bold tracking-wider">
+                      Insufficient ledger history in selected date range
                     </div>
-                  ))}
-                </div>
-              </div>
-            </div>
+                  ) : (
+                    <>
+                      <div className="h-[360px] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart
+                            data={visibleChartData}
+                            margin={{ top: 38, right: isMobile ? 14 : 20, left: isMobile ? -10 : 8, bottom: 18 }}
+                            barGap={2}
+                            barCategoryGap="25%"
+                          >
+                            <CartesianGrid stroke="#334155" strokeOpacity={0.4} vertical={true} horizontal={true} />
+                            <XAxis
+                              dataKey="label"
+                              stroke="#94a3b8"
+                              fontSize={11}
+                              fontWeight={700}
+                              tickLine={false}
+                              axisLine={false}
+                              tickFormatter={(val) => String(val).toUpperCase()}
+                              tick={{
+                                dy: 10,
+                                fill: '#94a3b8',
+                                fontSize: 11,
+                                fontWeight: 700,
+                                style: { letterSpacing: '0.05em' }
+                              }}
+                            />
+                            <YAxis
+                              stroke="#475569"
+                              fontSize={10}
+                              fontWeight={700}
+                              tickLine={false}
+                              axisLine={false}
+                              ticks={analyticsTicks}
+                              tickFormatter={fmtAxis}
+                              tick={{ fill: '#475569', fontSize: 10, fontWeight: 700 }}
+                              width={52}
+                            />
+                            <Tooltip
+                              cursor={{ fill: '#ffffff08' }}
+                              content={({ active, payload, label }) => {
+                                if (!active || !payload?.length) return null;
+                                const dData = payload[0]?.payload;
+                                const inc = dData?._income ?? 0;
+                                const exp = dData?._expense ?? 0;
+                                const inv = dData?._investment ?? 0;
+                                const totalOutflow = exp + inv;
+                                const netSavings = inc - totalOutflow;
+
+                                return (
+                                  <div className="bg-[#0f172a]/95 backdrop-blur border border-slate-700/60 p-4 rounded-xl shadow-2xl min-w-[240px]">
+                                    <p className="text-[12px] font-bold text-white mb-3 border-b border-slate-700/60 pb-2">
+                                      {label}{flowView === 'cumulative' ? ' (Cumulative)' : ''}
+                                    </p>
+                                    <div className="space-y-2">
+                                      {!hiddenFlowSeries.has('income') && (
+                                        <div className="flex items-center justify-between gap-8">
+                                          <div className="flex items-center gap-2">
+                                            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: FLOW_TEAL }} />
+                                            <span className="text-[11px] text-slate-300">
+                                              {flowView === 'cumulative' ? 'Total Income' : 'Income'}
+                                            </span>
+                                          </div>
+                                          <span className="text-[11px] font-bold text-white tabular-nums">
+                                            ৳{Math.round(inc).toLocaleString('en-IN')}
+                                          </span>
+                                        </div>
+                                      )}
+                                      {!hiddenFlowSeries.has('expense') && (
+                                        <div className="flex items-center justify-between gap-8">
+                                          <div className="flex items-center gap-2">
+                                            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: FLOW_ROSE }} />
+                                            <span className="text-[11px] text-slate-300">
+                                              {flowView === 'cumulative' ? 'Total Expense' : 'Expense'}
+                                            </span>
+                                          </div>
+                                          <span className="text-[11px] font-bold text-rose-400 tabular-nums">
+                                            ৳{Math.round(exp).toLocaleString('en-IN')}
+                                          </span>
+                                        </div>
+                                      )}
+                                      {!hiddenFlowSeries.has('investment') && (
+                                        <div className="flex items-center justify-between gap-8">
+                                          <div className="flex items-center gap-2">
+                                            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: FLOW_PINK }} />
+                                            <span className="text-[11px] text-slate-300">
+                                              {flowView === 'cumulative' ? 'Total Investment' : 'Investment'}
+                                            </span>
+                                          </div>
+                                          <span className="text-[11px] font-bold text-pink-300 tabular-nums">
+                                            ৳{Math.round(inv).toLocaleString('en-IN')}
+                                          </span>
+                                        </div>
+                                      )}
+                                      <div className="flex items-center justify-between gap-8 pt-2 border-t border-slate-700/40">
+                                        <div className="flex items-center gap-2">
+                                          <span className="text-[11px] font-bold text-slate-200">
+                                            {flowView === 'cumulative' ? 'Cumulative Net Savings' : 'Net Savings'}
+                                          </span>
+                                        </div>
+                                        <span className="text-[11px] font-bold tabular-nums" style={{ color: netSavings >= 0 ? FLOW_TEAL : '#f87171' }}>
+                                          {netSavings >= 0 ? '+' : '-'}৳{Math.abs(Math.round(netSavings)).toLocaleString('en-IN')}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              }}
+                            />
+
+                            {/* Left bar: Income */}
+                            <Bar
+                              dataKey="income"
+                              stackId="incomeStack"
+                              fill={FLOW_TEAL}
+                              radius={[4, 4, 0, 0]}
+                              barSize={22}
+                              isAnimationActive={false}
+                              legendType="none"
+                            >
+                              <LabelList
+                                dataKey="income"
+                                position="top"
+                                content={(props: any) => {
+                                  const { x, y, width, value } = props;
+                                  if (!value || hiddenFlowSeries.has('income')) return null;
+                                  return (
+                                    <g transform={`translate(${x + width / 2},${y - 10})`}>
+                                      <text transform="rotate(-90)" fill="#64748b" textAnchor="start" fontSize={10} fontWeight={700} className="font-display">
+                                        {fmtAxis(value)}
+                                      </text>
+                                    </g>
+                                  );
+                                }}
+                              />
+                            </Bar>
+
+                            {/* Right bar: Expense (Bottom stack) */}
+                            <Bar
+                              dataKey="expense"
+                              stackId="outflowStack"
+                              fill={FLOW_ROSE}
+                              radius={[0, 0, 0, 0]}
+                              barSize={22}
+                              isAnimationActive={false}
+                              legendType="none"
+                            >
+                              <LabelList
+                                dataKey="expense"
+                                position="top"
+                                content={(props: any) => {
+                                  const { x, y, width, value, index } = props;
+                                  if (hiddenFlowSeries.has('expense')) return null;
+                                  const gData = visibleChartData[index];
+                                  const invVal = gData?.investment ?? 0;
+                                  // If investment is showing on top, do not duplicate label at expense top
+                                  if (invVal > 0 && !hiddenFlowSeries.has('investment')) return null;
+                                  if (!value) return null;
+                                  return (
+                                    <g transform={`translate(${x + width / 2},${y - 10})`}>
+                                      <text transform="rotate(-90)" fill="#64748b" textAnchor="start" fontSize={10} fontWeight={700} className="font-display">
+                                        {fmtAxis(value)}
+                                      </text>
+                                    </g>
+                                  );
+                                }}
+                              />
+                            </Bar>
+
+                            {/* Right bar: Investment (Top stack) */}
+                            <Bar
+                              dataKey="investment"
+                              stackId="outflowStack"
+                              fill={FLOW_PINK}
+                              radius={[4, 4, 0, 0]}
+                              barSize={22}
+                              isAnimationActive={false}
+                              legendType="none"
+                            >
+                              <LabelList
+                                dataKey="investment"
+                                position="top"
+                                content={(props: any) => {
+                                  const { x, y, width, value, index } = props;
+                                  if (hiddenFlowSeries.has('investment') && hiddenFlowSeries.has('expense')) return null;
+                                  const gData = visibleChartData[index];
+                                  const expVal = gData?.expense ?? 0;
+                                  const stackTotal = expVal + (value ?? 0);
+                                  if (stackTotal <= 0 && !value) return null;
+                                  return (
+                                    <g transform={`translate(${x + width / 2},${y - 10})`}>
+                                      <text transform="rotate(-90)" fill="#64748b" textAnchor="start" fontSize={10} fontWeight={700} className="font-display">
+                                        {fmtAxis(stackTotal)}
+                                      </text>
+                                    </g>
+                                  );
+                                }}
+                              />
+                            </Bar>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+
+                      {/* Clickable Legend matching DSE Tracker */}
+                      <div className="mt-6 pt-6 border-t border-slate-800/50 flex flex-wrap justify-center gap-x-6 gap-y-3">
+                        {ANALYTICS_FLOW_LEGENDS.map(({ key, label, color }) => {
+                          const hidden = hiddenFlowSeries.has(key);
+                          return (
+                            <button
+                              key={key}
+                              type="button"
+                              onClick={() => toggleFlowSeries(key)}
+                              className="flex items-center gap-2 transition-opacity hover:opacity-80 active:scale-95"
+                              style={{ opacity: hidden ? 0.35 : 1 }}
+                            >
+                              <div className="w-3 h-3 rounded-sm shrink-0" style={{ backgroundColor: color }} />
+                              <span
+                                className="text-[12px] font-bold text-slate-300 uppercase tracking-tight whitespace-nowrap"
+                                style={{ textDecoration: hidden ? 'line-through' : 'none' }}
+                              >
+                                {label}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+                </Card>
+              );
+            })()}
+
+            {/* ── Asset by Accounts (BDT) (50%) ── */}
+            <AnalyticsPieCard
+              title="Asset by Accounts (BDT)"
+              icon={<PieChart size={20} className="text-sky-400" />}
+              emptyText="No active account assets available"
+              slices={assetSlices}
+              excluded={excludedAssetAccounts}
+              onToggleExcluded={toggleExcludedAsset}
+              centerLabel="TOTAL ASSETS"
+              itemNoun="ACCOUNTS"
+              legendPosition="bottom"
+            />
           </div>
-        );
+
+          {/* ── Row 2: Incomes by Category (50%) + Expenses by Category (50%) ── */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8 w-full items-stretch">
+            {/* 1. Incomes by Category (BDT) (50%) */}
+            <AnalyticsPieCard
+              title="Incomes by Category (BDT)"
+              icon={<PieChart size={20} className="text-teal-400" />}
+              emptyText="No income logged in selected period"
+              slices={incomeSlices}
+              excluded={excludedIncomeCats}
+              onToggleExcluded={toggleExcludedIncome}
+              centerLabel="INCOMES"
+              itemNoun="CATEGORIES"
+            />
+
+            {/* 2. Expenses by Category (BDT) (50%) */}
+            <AnalyticsPieCard
+              title="Expenses by Category (BDT)"
+              icon={<PieChart size={20} className="text-rose-400" />}
+              emptyText="No expenses logged in selected period"
+              slices={expenseSlices}
+              excluded={excludedExpenseCats}
+              onToggleExcluded={toggleExcludedExpense}
+              centerLabel="EXPENSES"
+              itemNoun="CATEGORIES"
+            />
+          </div>
+        </div>
+      );
       }
 
       // ─── SETTINGS SUBMODULE ──────────────────────────────────────────────
       case 'settings': {
         return (
           <div className="space-y-6 sm:space-y-8">
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
-              <h4 className="text-subheading font-bold text-white uppercase tracking-tight mb-2">Foreign Exchange rate setting</h4>
-              <p className="text-label text-slate-500 font-semibold uppercase mb-6">Defines conversion ratios from LYD and USD to native BDT currency</p>
-              <form onSubmit={handleSaveRates} className="grid grid-cols-1 md:grid-cols-3 gap-6 items-end">
-                <Input label="USD TO BDT RATE (৳)" type="number" step="0.01" value={usdRateForm} onChange={(e) => setUsdRateForm(e.target.value)} placeholder="e.g. 118" />
-                <Input label="LYD TO BDT RATE (৳)" type="number" step="0.01" value={lydRateForm} onChange={(e) => setLydRateForm(e.target.value)} placeholder="e.g. 24.50" />
-                <Button type="submit" className="w-full h-10">Save Conversion Rates</Button>
-              </form>
-            </div>
-
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
               <div className="flex justify-between items-center mb-6">
                 <div>
@@ -3937,7 +6143,12 @@ export function IncomeExpenseModule({
                               <GripVertical size={14} />
                             </button>
                           </td>
-                          <td className="py-4 font-bold text-white">{acc.name}</td>
+                          <td className="py-4 font-bold text-white">
+                            <div className="flex items-center gap-2.5">
+                              <AccountBadgeIcon account={acc} size="sm" />
+                              <span>{acc.name}</span>
+                            </div>
+                          </td>
                           <td className="py-4">
                             <span className={cn("px-2 py-0.5 rounded text-[8px] font-extrabold uppercase", acc.currency === 'BDT' ? "bg-teal-400/10 text-teal-400 border border-teal-400/20" : acc.currency === 'USD' ? "bg-sky-400/10 text-sky-400 border border-sky-400/20" : "bg-amber-400/10 text-amber-400 border border-amber-400/20")}>{acc.currency}</span>
                           </td>
@@ -3995,6 +6206,7 @@ export function IncomeExpenseModule({
                   <tbody className="divide-y divide-slate-800/40">
                     {categories.map((cat, index) => {
                       const isCatBeingHoveredForDrop = draggedSubCat && dragOverCatId === cat.id && draggedSubCat.sourceCatId !== cat.id;
+                      const catVisual = getCategoryVisual(cat.name, cat.type);
 
                       return (
                         <tr
@@ -4041,6 +6253,9 @@ export function IncomeExpenseModule({
                           </td>
                           <td className="py-4 font-bold text-white">
                             <div className="flex items-center gap-2">
+                              <div className={cn("w-5.5 h-5.5 rounded-md flex items-center justify-center shrink-0 border", catVisual.bg)}>
+                                <catVisual.Icon size={12} />
+                              </div>
                               <span>{cat.name}</span>
                               {isCatBeingHoveredForDrop && (
                                 <span className="text-[9px] font-bold text-teal-400 bg-teal-400/10 px-1.5 py-0.5 rounded animate-pulse">
@@ -4102,7 +6317,7 @@ export function IncomeExpenseModule({
                                           }
                                         }}
                                         className={cn(
-                                          "inline-flex items-center gap-1 px-2 py-1 rounded-md border text-[10px] font-medium select-none cursor-grab active:cursor-grabbing transition-all duration-150 group/chip",
+                                          "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[10px] font-medium select-none cursor-grab active:cursor-grabbing transition-all duration-150 group/chip",
                                           isDraggingThis
                                             ? "opacity-30 border-dashed border-teal-400 bg-slate-900"
                                             : "bg-slate-950 border-slate-800/80 text-slate-300 hover:border-teal-500/50 hover:bg-slate-900 hover:text-teal-300 shadow-sm"
@@ -4161,9 +6376,17 @@ export function IncomeExpenseModule({
   const currencyColorClass = activeCurrency === 'BDT' ? 'text-teal-400' : activeCurrency === 'USD' ? 'text-sky-400' : 'text-amber-400';
   const currencyBgClass = activeCurrency === 'BDT' ? 'bg-teal-400/10 border-teal-400/20' : activeCurrency === 'USD' ? 'bg-sky-400/10 border-sky-400/20' : 'bg-amber-400/10 border-amber-400/20';
 
+  // Amount is locked (read-only) when editing a transaction synced from the DSE
+  // Tracker as a Dividend or a Capital Gain (Stocks Sell P&L) — the real value lives
+  // in the DSE Tracker and must be edited there to keep both ledgers in sync.
+  const isDseAmountLocked = !!editingTx && !!(inheritedDseTxId || editingTx?.dseTxId) && (
+    txForm.category === 'Capital Gain' ||
+    txForm.subCategory === 'Stocks Capital Gain' ||
+    (txForm.type === 'Income' && (txForm.subCategory || '').toLowerCase().includes('dividend'))
+  );
+
   return (
     <div className="space-y-6 sm:space-y-8">
-      
       {/* Dynamic Header Range & Action Row */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/50 border border-slate-800 rounded-xl p-2 relative">
         <div className="flex flex-col sm:flex-row sm:items-center gap-3 w-full sm:w-auto">
@@ -4195,19 +6418,44 @@ export function IncomeExpenseModule({
                 ))}
               </div>
             </div>
+            {/* Settings Button - Mobile Only */}
             <div className="block sm:hidden">
-              <button onClick={() => setIsActionMenuOpen(!isActionMenuOpen)} className="flex items-center justify-center bg-teal-400 text-slate-950 p-2 h-9 w-9 rounded-lg shadow-lg">
-                <SlidersHorizontal size={14} />
-              </button>
-              {isActionMenuOpen && (
-                <>
-                  <div className="fixed inset-0 z-40" onClick={() => setIsActionMenuOpen(false)} />
-                  <div className="absolute right-0 mt-2 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-2 text-label">
-                    <button onClick={() => { handleExportExcel(); setIsActionMenuOpen(false); }} className="w-full flex items-center gap-2 px-3 py-1.5 font-bold hover:bg-slate-800 rounded-lg"><Download size={14} className="text-teal-400" /> Export Excel</button>
-                    <label className="w-full flex items-center gap-2 px-3 py-1.5 font-bold hover:bg-slate-800 rounded-lg cursor-pointer"><Upload size={14} className="text-teal-400" /> Import CSV/Excel<input type="file" className="hidden" accept=".xlsx,.xls,.csv" onChange={(e) => { setIsActionMenuOpen(false); handleImportExcel(e); }} /></label>
-                  </div>
-                </>
-              )}
+              <div className="relative">
+                <button 
+                  onClick={() => setIsSettingsMenuOpen(!isSettingsMenuOpen)}
+                  className="flex items-center justify-center gap-2 px-3 sm:px-4 py-2 rounded-md text-[10px] font-bold uppercase transition-all whitespace-nowrap bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/10 hover:bg-teal-300 hover:shadow-teal-400/20"
+                >
+                  <Settings size={14} />
+                  <ChevronDown size={14} className={cn("opacity-50 transition-transform", isSettingsMenuOpen ? "rotate-180" : "")} />
+                </button>
+
+                {isSettingsMenuOpen && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setIsSettingsMenuOpen(false)} />
+                    <div className="absolute right-0 mt-2 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-2 animate-in fade-in zoom-in-95 backdrop-blur-xl transition-all">
+                      <button 
+                        onClick={() => { handleExportExcel(); setIsSettingsMenuOpen(false); }}
+                        className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
+                      >
+                        <Download size={14} className="text-teal-400" />
+                        EXPORT
+                      </button>
+                      <label className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase cursor-pointer">
+                        <Upload size={14} className="text-teal-400" />
+                        IMPORT
+                        <input type="file" className="hidden" accept=".xlsx,.xls,.csv" onChange={(e) => { setIsSettingsMenuOpen(false); handleImportExcel(e); }} />
+                      </label>
+                      <button 
+                        onClick={() => { handleDownloadTemplate(); setIsSettingsMenuOpen(false); }}
+                        className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
+                      >
+                        <FileSpreadsheet size={14} className="text-teal-400" />
+                        TEMPLATE
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
           </div>
 
@@ -4228,10 +6476,45 @@ export function IncomeExpenseModule({
           </div>
         </div>
 
-        <div className="hidden sm:flex items-center gap-2 pr-1">
-          <Button variant="secondary" size="sm" onClick={handleExportExcel} className="p-2 shrink-0"><Download size={14} className="text-teal-400" /> Export Data</Button>
-          <label className="px-3.5 py-2 hover:bg-slate-800/80 hover:text-white rounded-lg border border-slate-700/80 flex items-center gap-2 cursor-pointer text-label font-bold uppercase shrink-0"><Upload size={14} className="text-teal-400" /> Import CSV/Excel<input type="file" className="hidden" accept=".xlsx,.xls,.csv" onChange={handleImportExcel} /></label>
-          <button onClick={handleDownloadTemplate} className="p-2 text-slate-400 hover:text-white shrink-0"><Info size={14} /></button>
+        {/* Settings Button - Desktop Only */}
+        <div className="hidden sm:block">
+          <div className="relative">
+            <button 
+              onClick={() => setIsSettingsMenuOpen(!isSettingsMenuOpen)}
+              className="flex items-center justify-center gap-2 px-3 sm:px-4 py-2 rounded-md text-[10px] font-bold uppercase transition-all whitespace-nowrap bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/10 hover:bg-teal-300 hover:shadow-teal-400/20"
+            >
+              <Settings size={14} />
+              <span className="hidden sm:inline">Settings</span>
+              <ChevronDown size={14} className={cn("opacity-50 transition-transform", isSettingsMenuOpen ? "rotate-180" : "")} />
+            </button>
+
+            {isSettingsMenuOpen && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setIsSettingsMenuOpen(false)} />
+                <div className="absolute right-0 mt-2 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-2 backdrop-blur-xl">
+                  <button 
+                    onClick={() => { handleExportExcel(); setIsSettingsMenuOpen(false); }}
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
+                  >
+                    <Download size={14} className="text-teal-400" />
+                    EXPORT
+                  </button>
+                  <label className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase cursor-pointer">
+                    <Upload size={14} className="text-teal-400" />
+                    IMPORT
+                    <input type="file" className="hidden" accept=".xlsx,.xls,.csv" onChange={(e) => { setIsSettingsMenuOpen(false); handleImportExcel(e); }} />
+                  </label>
+                  <button 
+                    onClick={() => { handleDownloadTemplate(); setIsSettingsMenuOpen(false); }}
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
+                  >
+                    <FileSpreadsheet size={14} className="text-teal-400" />
+                    TEMPLATE
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </div>
 
@@ -4241,8 +6524,8 @@ export function IncomeExpenseModule({
       {/* ─── REDESIGNED TRANSACTION MODAL ─────────────────────────────────── */}
       <Modal
         isOpen={isTxModalOpen}
-        onClose={() => { setIsTxModalOpen(false); setEditingTx(null); }}
-        title={editingTx ? "Edit Transaction Entry" : "New Ledger Entry"}
+        onClose={() => { setIsTxModalOpen(false); setEditingTx(null); isFromExternalModuleRef.current = false; }}
+        title={editingTx ? "Edit Transaction" : "New Transaction"}
       >
         <form onSubmit={handleSaveTx} className="space-y-5">
 
@@ -4306,18 +6589,13 @@ export function IncomeExpenseModule({
                           : "bg-slate-950 border-slate-800 border-dashed hover:border-slate-600"
                       )}
                     >
-                      <div className={cn(
-                        "w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-all",
-                        txForm.accountId && selectedAccount
-                          ? selectedAccount.currency === 'BDT'
-                            ? "bg-teal-400/15 text-teal-400"
-                            : selectedAccount.currency === 'LYD'
-                              ? "bg-amber-400/15 text-amber-400"
-                              : "bg-sky-400/15 text-sky-400"
-                          : "bg-slate-800 text-slate-500 group-hover:bg-slate-700"
-                      )}>
-                        <CreditCard size={14} />
-                      </div>
+                      {txForm.accountId && selectedAccount ? (
+                        <AccountBadgeIcon account={selectedAccount} size="lg" />
+                      ) : (
+                        <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-all bg-slate-800 text-slate-500 group-hover:bg-slate-700">
+                          <CreditCard size={14} />
+                        </div>
+                      )}
                       <div className="flex-1 min-w-0">
                         {txForm.accountId && selectedAccount ? (
                           <>
@@ -4397,18 +6675,13 @@ export function IncomeExpenseModule({
                           : "bg-slate-950 border-slate-800 border-dashed hover:border-slate-600"
                       )}
                     >
-                      <div className={cn(
-                        "w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-all",
-                        txForm.toAccountId && accounts.find(a => a.id === txForm.toAccountId)
-                          ? accounts.find(a => a.id === txForm.toAccountId)?.currency === 'BDT'
-                            ? "bg-teal-400/15 text-teal-400"
-                            : accounts.find(a => a.id === txForm.toAccountId)?.currency === 'LYD'
-                              ? "bg-amber-400/15 text-amber-400"
-                              : "bg-sky-400/15 text-sky-400"
-                          : "bg-slate-800 text-slate-500 group-hover:bg-slate-700"
-                      )}>
-                        <CreditCard size={14} />
-                      </div>
+                      {txForm.toAccountId && accounts.find(a => a.id === txForm.toAccountId) ? (
+                        <AccountBadgeIcon account={accounts.find(a => a.id === txForm.toAccountId)} size="lg" />
+                      ) : (
+                        <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-all bg-slate-800 text-slate-500 group-hover:bg-slate-700">
+                          <CreditCard size={14} />
+                        </div>
+                      )}
                       <div className="flex-1 min-w-0">
                         {txForm.toAccountId && accounts.find(a => a.id === txForm.toAccountId) ? (
                           <>
@@ -4465,152 +6738,6 @@ export function IncomeExpenseModule({
                 </div>
               </div>
 
-              {/* Auto-update to DSE Tracker option for BO Account transfers */}
-              {isBoAccount(accounts.find(a => a.id === txForm.toAccountId)) && (
-                <div 
-                  id="dse-auto-update-option"
-                  onClick={() => setSyncToDse(!syncToDse)}
-                  className={cn(
-                    "w-full p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between gap-3 select-none",
-                    syncToDse
-                      ? "bg-teal-950/40 border-teal-500/40 text-teal-300 shadow-[0_0_15px_rgba(45,212,191,0.08)]"
-                      : "bg-slate-950/60 border-slate-800 text-slate-400 hover:border-slate-700"
-                  )}
-                >
-                  <div className="flex items-center gap-3 min-w-0 flex-1">
-                    <div className={cn(
-                      "w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors",
-                      syncToDse ? "bg-teal-400/20 text-teal-400" : "bg-slate-800 text-slate-500"
-                    )}>
-                      <TrendingUp size={15} />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-[11px] font-bold text-white uppercase tracking-tight whitespace-nowrap">
-                          Auto-Update to DSE Tracker
-                        </span>
-                        <span className={cn(
-                          "text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded border shrink-0",
-                          syncToDse ? "bg-teal-400/15 text-teal-300 border-teal-500/30" : "bg-slate-800 text-slate-500 border-slate-700"
-                        )}>
-                          {syncToDse ? "Enabled" : "Disabled"}
-                        </span>
-                      </div>
-                      <p className="text-[10px] text-slate-400 font-medium truncate mt-0.5">
-                        Automatically records this transfer as a Deposit in DSE Tracker &gt; Transactions
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="shrink-0 pl-2" onClick={(e) => e.stopPropagation()}>
-                    <Checkbox
-                      id="sync-to-dse-checkbox"
-                      checked={syncToDse}
-                      onChange={(val) => setSyncToDse(val)}
-                    />
-                  </div>
-                </div>
-              )}
-
-              {/* Automatic modal redirection info for Mutual Fund transfers */}
-              {isMutualFundAccount(accounts.find(a => a.id === txForm.toAccountId)) && (
-                <div 
-                  id="mf-auto-redirect-info"
-                  className="w-full p-3 rounded-xl border bg-emerald-950/30 border-emerald-500/30 text-emerald-300 flex items-center gap-3 select-none"
-                >
-                  <div className="w-8 h-8 rounded-lg bg-emerald-400/20 text-emerald-400 flex items-center justify-center shrink-0">
-                    <PieIcon size={15} />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-[11px] font-bold text-white uppercase tracking-tight whitespace-nowrap">
-                        Mutual Fund Investment Flow
-                      </span>
-                      <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded border bg-emerald-400/15 text-emerald-300 border-emerald-500/30 shrink-0">
-                        Auto-Open Modal
-                      </span>
-                    </div>
-                    <p className="text-[10px] text-slate-400 font-medium truncate mt-0.5">
-                      On save, opens Mutual Fund &gt; New Investment modal inheriting date &amp; amount
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              {/* Automatic modal redirection info for Online Investment transfers */}
-              {isOnlineInvestmentAccount(accounts.find(a => a.id === txForm.toAccountId)) && (
-                <div 
-                  id="online-auto-redirect-info"
-                  className="w-full p-3 rounded-xl border bg-blue-950/30 border-blue-500/30 text-blue-300 flex items-center gap-3 select-none"
-                >
-                  <div className="w-8 h-8 rounded-lg bg-blue-400/20 text-blue-400 flex items-center justify-center shrink-0">
-                    <Briefcase size={15} />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-[11px] font-bold text-white uppercase tracking-tight whitespace-nowrap">
-                        Online Investment Flow
-                      </span>
-                      <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded border bg-blue-400/15 text-blue-300 border-blue-500/30 shrink-0">
-                        Auto-Open Modal
-                      </span>
-                    </div>
-                    <p className="text-[10px] text-slate-400 font-medium truncate mt-0.5">
-                      On save, opens Online Investments &gt; New Investment modal inheriting date &amp; amount
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              {/* Automatic modal redirection info for Sukuk transfers */}
-              {isSukukAccount(accounts.find(a => a.id === txForm.toAccountId)) && (
-                <div 
-                  id="sukuk-auto-redirect-info"
-                  className="w-full p-3 rounded-xl border bg-amber-950/30 border-amber-500/30 text-amber-300 flex items-center gap-3 select-none"
-                >
-                  <div className="w-8 h-8 rounded-lg bg-amber-400/20 text-amber-400 flex items-center justify-center shrink-0">
-                    <Landmark size={15} />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-[11px] font-bold text-white uppercase tracking-tight whitespace-nowrap">
-                        Sukuk Investment Flow
-                      </span>
-                      <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded border bg-amber-400/15 text-amber-300 border-amber-500/30 shrink-0">
-                        Auto-Open Modal
-                      </span>
-                    </div>
-                    <p className="text-[10px] text-slate-400 font-medium truncate mt-0.5">
-                      On save, opens Sukuk Funds &gt; New Investment modal inheriting date &amp; amount
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              {/* Automatic modal redirection info for Fixed Deposit transfers */}
-              {isFdrAccount(accounts.find(a => a.id === txForm.toAccountId)) && (
-                <div 
-                  id="fdr-auto-redirect-info"
-                  className="w-full p-3 rounded-xl border bg-teal-950/30 border-teal-500/30 text-teal-300 flex items-center gap-3 select-none"
-                >
-                  <div className="w-8 h-8 rounded-lg bg-teal-400/20 text-teal-400 flex items-center justify-center shrink-0">
-                    <CreditCard size={15} />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-[11px] font-bold text-white uppercase tracking-tight whitespace-nowrap">
-                        Fixed Deposit Flow
-                      </span>
-                      <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded border bg-teal-400/15 text-teal-300 border-teal-500/30 shrink-0">
-                        Auto-Open Modal
-                      </span>
-                    </div>
-                    <p className="text-[10px] text-slate-400 font-medium truncate mt-0.5">
-                      On save, opens Fixed Deposits &gt; New FD modal inheriting date &amp; amount
-                    </p>
-                  </div>
-                </div>
-              )}
             </div>
           ) : (
             <>
@@ -4683,18 +6810,13 @@ export function IncomeExpenseModule({
                         : "bg-slate-950 border-slate-800 border-dashed hover:border-slate-600"
                     )}
                   >
-                    <div className={cn(
-                      "w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-all",
-                      txForm.accountId && selectedAccount
-                        ? selectedAccount.currency === 'BDT'
-                          ? "bg-teal-400/15 text-teal-400"
-                          : selectedAccount.currency === 'LYD'
-                            ? "bg-amber-400/15 text-amber-400"
-                            : "bg-sky-400/15 text-sky-400"
-                        : "bg-slate-800 text-slate-500 group-hover:bg-slate-700"
-                    )}>
-                      <CreditCard size={14} />
-                    </div>
+                    {txForm.accountId && selectedAccount ? (
+                      <AccountBadgeIcon account={selectedAccount} size="lg" />
+                    ) : (
+                      <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-all bg-slate-800 text-slate-500 group-hover:bg-slate-700">
+                        <CreditCard size={14} />
+                      </div>
+                    )}
                     <div className="flex-1 min-w-0">
                       {txForm.accountId && selectedAccount ? (
                         <>
@@ -4738,13 +6860,21 @@ export function IncomeExpenseModule({
                     required
                     placeholder="0.00"
                     value={txForm.amount}
-                    onChange={(e) => setTxForm(prev => ({ ...prev, amount: e.target.value }))}
+                    readOnly={isDseAmountLocked}
+                    onChange={(e) => {
+                      if (isDseAmountLocked) return;
+                      setTxForm(prev => ({ ...prev, amount: e.target.value }));
+                    }}
                     className={cn(
                       "w-full bg-slate-950 border border-slate-800 rounded-xl pl-24 pr-4 py-3 text-base font-extrabold text-white placeholder-slate-700 outline-none tabular-nums transition-all",
-                      "focus:border-slate-600 focus:ring-1 focus:ring-slate-600/40",
-                      activeCurrency === 'BDT' ? "focus:border-teal-500/40 focus:ring-teal-500/10" :
-                      activeCurrency === 'LYD' ? "focus:border-amber-500/40 focus:ring-amber-500/10" :
-                      "focus:border-sky-500/40 focus:ring-sky-500/10"
+                      isDseAmountLocked
+                        ? "opacity-60 cursor-not-allowed text-slate-400"
+                        : cn(
+                            "focus:border-slate-600 focus:ring-1 focus:ring-slate-600/40",
+                            activeCurrency === 'BDT' ? "focus:border-teal-500/40 focus:ring-teal-500/10" :
+                            activeCurrency === 'LYD' ? "focus:border-amber-500/40 focus:ring-amber-500/10" :
+                            "focus:border-sky-500/40 focus:ring-sky-500/10"
+                          )
                     )}
                   />
                   {/* BDT equivalent hint if not BDT */}
@@ -4754,8 +6884,80 @@ export function IncomeExpenseModule({
                     </div>
                   )}
                 </div>
+                {isDseAmountLocked && (
+                  <p className="mt-1.5 text-[10px] font-bold text-slate-500 uppercase tracking-wide">
+                    Locked — edit this amount from the DSE Tracker instead
+                  </p>
+                )}
               </div>
             </>
+          )}
+
+          {/* Sync with DSE Tracker option ONLY for transactions related to DSE Tracker module */}
+          {(() => {
+            const isNonDseLinked = !!inheritedOnlineInstallmentTxId || !!inheritedOnlineGroupId || !!editingTx?.onlineTxId ||
+              !!inheritedSukukGroupId || !!inheritedSukukRentTxId || !!editingTx?.sukukTxId ||
+              !!inheritedFdrProfitTxId || !!editingTx?.fdrTxId ||
+              !!inheritedMfGroupId || !!editingTx?.mfTxId ||
+              isMutualFundAccount(accounts.find(a => a.id === txForm.accountId)) ||
+              isMutualFundAccount(accounts.find(a => a.id === txForm.toAccountId)) ||
+              isOnlineInvestmentAccount(accounts.find(a => a.id === txForm.accountId)) ||
+              isOnlineInvestmentAccount(accounts.find(a => a.id === txForm.toAccountId)) ||
+              isSukukAccount(accounts.find(a => a.id === txForm.accountId)) ||
+              isSukukAccount(accounts.find(a => a.id === txForm.toAccountId)) ||
+              isFdrAccount(accounts.find(a => a.id === txForm.accountId)) ||
+              isFdrAccount(accounts.find(a => a.id === txForm.toAccountId));
+
+            if (isNonDseLinked) return false;
+
+            const fromAcc = accounts.find(a => a.id === txForm.accountId);
+            const toAcc = accounts.find(a => a.id === txForm.toAccountId);
+
+            if (txForm.type === 'Transfer') {
+              return isBoAccount(fromAcc) || isBoAccount(toAcc);
+            }
+
+            if (txForm.type === 'Income') {
+              return !!inheritedDseTxId || !!editingTx?.dseTxId || isBoAccount(fromAcc) || txForm.category === 'Capital Gain' || txForm.subCategory === 'Stocks Capital Gain';
+            }
+
+            if (txForm.type === 'Expense') {
+              return !!inheritedDseTxId || !!editingTx?.dseTxId || isBoAccount(fromAcc);
+            }
+
+            return false;
+          })() && (
+            <div
+              id="dse-auto-update-option"
+              onClick={() => setSyncToDse(prev => !prev)}
+              className={cn(
+                "w-full p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between gap-3 select-none",
+                syncToDse
+                  ? "bg-teal-950/40 border-teal-500/40 text-teal-300 shadow-[0_0_15px_rgba(45,212,191,0.08)]"
+                  : "bg-slate-950/60 border-slate-800 text-slate-400 hover:border-slate-700"
+              )}
+            >
+              <div className="min-w-0 flex-1">
+                <span className="text-[11px] font-bold text-white uppercase tracking-tight whitespace-nowrap">
+                  Sync with DSE Tracker {
+                    txForm.type === 'Income' && (txForm.category === 'Capital Gain' || txForm.subCategory === 'Stocks Capital Gain')
+                      ? '(Stocks P&L)'
+                      : txForm.type === 'Income'
+                        ? '(Dividend)'
+                        : txForm.type === 'Expense'
+                          ? '(Charge)'
+                          : ''
+                  }
+                </span>
+              </div>
+              <div className="shrink-0 pl-2" onClick={(e) => e.stopPropagation()}>
+                <Checkbox
+                  id="sync-to-dse-checkbox"
+                  checked={syncToDse}
+                  onChange={(val) => setSyncToDse(val)}
+                />
+              </div>
+            </div>
           )}
 
           {/* Row 5: Narrations with Autocomplete Suggestions */}
@@ -4923,11 +7125,11 @@ export function IncomeExpenseModule({
 
           {/* Actions */}
           <div className="pt-2 flex gap-3">
-            <Button type="button" variant="secondary" className="flex-1" onClick={() => { setIsTxModalOpen(false); setEditingTx(null); }}>
+            <Button type="button" variant="secondary" className="flex-1" onClick={() => { setIsTxModalOpen(false); setEditingTx(null); isFromExternalModuleRef.current = false; }}>
               Cancel
             </Button>
             <Button type="submit" className="flex-1">
-              {editingTx ? "Save Changes" : "Record Entry"}
+              {editingTx ? "Update Transaction" : "Record Transaction"}
             </Button>
           </div>
         </form>
@@ -4995,7 +7197,7 @@ export function IncomeExpenseModule({
             <Checkbox id="acc-is-parent-checkbox" label="Is Group Account (Contains sub-accounts)" checked={accForm.isParent} onChange={(checked) => setAccForm(prev => ({ ...prev, isParent: checked, parentId: checked ? '' : prev.parentId }))} />
           </div>
           {!accForm.isParent && (
-            <Select label="Assign to Parent Group (Optional)" value={accForm.parentId} onChange={(v) => setAccForm(prev => ({ ...prev, parentId: v }))} options={[{ label: 'None (Standalone)', value: '' }, ...accounts.filter(a => a.isParent && a.id !== editingAcc?.id && a.currency === accForm.currency).map(a => ({ label: a.name, value: a.id }))]} />
+            <Select label="Assign to Parent Group (Optional)" value={accForm.parentId} onChange={(v) => setAccForm(prev => ({ ...prev, parentId: v }))} options={[{ label: 'None (Standalone)', value: '' }, ...accounts.filter(a => a.isParent && a.id !== editingAcc?.id).map(a => ({ label: a.name, value: a.id }))]} />
           )}
           <div className="pt-4 flex gap-3">
             <Button type="button" variant="secondary" className="flex-1" onClick={() => { setIsAccModalOpen(false); setEditingAcc(null); }}>Cancel</Button>
@@ -5029,17 +7231,22 @@ export function IncomeExpenseModule({
         </Modal>
       )}
 
-      {/* Custom Non-blocking Confirm Modal */}
+      {/* Custom Non-blocking Confirm Dialog */}
       {customConfirm && (
-        <Modal isOpen={!!customConfirm} onClose={() => setCustomConfirm(null)} title={customConfirm.title}>
-          <div className="space-y-5 py-2">
-            <p className="text-body font-semibold text-slate-300 leading-relaxed">{customConfirm.message}</p>
-            <div className="pt-3 flex gap-3 justify-end">
-              <Button type="button" variant="secondary" onClick={() => setCustomConfirm(null)} className="px-5 font-semibold">No, Cancel</Button>
-              <Button type="button" variant="danger" onClick={() => { customConfirm.onConfirm(); setCustomConfirm(null); }} className="px-5 font-semibold">Yes, Confirm</Button>
-            </div>
-          </div>
-        </Modal>
+        <ConfirmDialog
+          isOpen={!!customConfirm}
+          title={customConfirm.title}
+          message={customConfirm.message}
+          variant={customConfirm.variant}
+          confirmLabel={customConfirm.confirmLabel}
+          cancelLabel={customConfirm.cancelLabel}
+          details={customConfirm.details}
+          onConfirm={() => {
+            customConfirm.onConfirm();
+            setCustomConfirm(null);
+          }}
+          onCancel={() => setCustomConfirm(null)}
+        />
       )}
 
     </div>

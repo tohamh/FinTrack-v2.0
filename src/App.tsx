@@ -5,7 +5,7 @@
 
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { useAppState } from './hooks/useAppState';
-import { AppState } from './types';
+import { AppState, BankAccount } from './types';
 import { Sidebar, Navbar } from './components/layout/Navigation';
 import { PinLogin } from './components/auth/PinLogin';
 import { DashboardCharts, SummaryCard } from './components/dashboard/DashboardComponents';
@@ -15,12 +15,12 @@ import { DseTrackerModule } from './components/modules/DseTrackerModule';
 import { MutualFundsModule } from './components/modules/MutualFundsModule';
 import { FixedDepositsModule } from './components/modules/FixedDepositsModule';
 import { SettingsModule } from './components/modules/SettingsModule';
-import { IncomeExpenseModule } from './components/modules/IncomeExpenseModule';
+import { IncomeExpenseModule, isBoAccount } from './components/modules/IncomeExpenseModule';
 import { Wallet, TrendingUp, PieChart, Banknote, Landmark, Plus, Briefcase, Coins, DollarSign, Calendar, ChevronDown, ChevronLeft, ChevronRight, Settings, Download, Upload, AlertCircle, CheckCircle2, XCircle } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { formatBDT, cn } from './utils/formatters';
 import { Button } from './components/ui/BaseComponents';
-import { schedulePush, resolveOnStartup, flushOnUnload, markDirty, syncAllModules, startAutoSync } from './utils/sheetSync';
+import { schedulePush, resolveOnStartup, flushOnUnload, markDirty, syncAllModules, startAutoSync, serializeIncomeExpense, deserializeIncomeExpense } from './utils/sheetSync';
 import type { ModuleKey } from './utils/sheetSync';
 
 // ─── DSE cache keys (must match DseTrackerModule) ─────────────────────────────
@@ -51,14 +51,26 @@ export default function App() {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isMobileOpen, setIsMobileOpen] = useState(false);
   const [triggerAdd, setTriggerAdd] = useState(false);
-  const [inheritedAddData, setInheritedAddData] = useState<{
+    const [inheritedAddData, setInheritedAddData] = useState<{
     date: string;
     amount: number;
     type?: 'Transfer' | 'Income' | 'Expense' | 'Loan';
+    category?: string;
+    subCategory?: string;
     targetModule?: string;
     description?: string;
+    linkedTxId?: string;
+    accountId?: string;
+    returnModule?: string;
   } | null>(null);
   const latestStateRef = useRef(state);
+  // Prevent a Google Sheets pull from being immediately pushed back as a new local edit.
+  const suppressNextIncomeExpenseSyncRef = useRef(false);
+  const incomeExpenseSnapshotRef = useRef<string | null>(null);
+
+  const handleClearInheritedData = useCallback(() => {
+    setInheritedAddData(null);
+  }, []);
 
   const handleNavigateToModule = (
     module: string,
@@ -66,20 +78,90 @@ export default function App() {
       date: string;
       amount: number;
       type?: 'Transfer' | 'Income' | 'Expense' | 'Loan';
+      category?: string;
+      subCategory?: string;
       targetModule?: string;
       description?: string;
-    }
+      linkedTxId?: string;
+      accountId?: string;
+      returnModule?: string;
+    },
+    openModal: boolean = true
   ) => {
     if (initialAddData) {
       setInheritedAddData(initialAddData);
+    } else {
+      setInheritedAddData(null);
     }
     setActiveModule(module);
-    setTriggerAdd(true);
+    if (openModal) {
+      setTriggerAdd(true);
+    } else {
+      setTriggerAdd(false);
+    }
   };
+
+  const handleCreateFdrAccount = useCallback((currency: 'BDT' | 'USD', accountName: string, initialDate: string) => {
+    updateState(s => {
+      const accs = s.incomeExpenseAccounts || [];
+      const parentName = currency === 'USD' ? 'Bank USD' : 'Investments';
+      const parent = accs.find(
+        a => a.isParent && a.currency === currency && a.name.trim().toLowerCase() === parentName.toLowerCase()
+      );
+
+      const newAccount: BankAccount = {
+        id: 'acc-' + crypto.randomUUID().slice(0, 8),
+        name: accountName,
+        currency,
+        initialBalance: 0,
+        initialDate,
+        isParent: false,
+        parentId: parent?.id
+      };
+
+      return {
+        ...s,
+        incomeExpenseAccounts: [...accs, newAccount]
+      };
+    });
+  }, [updateState]);
 
 useEffect(() => {
   latestStateRef.current = state;
 }, [state]);
+
+  // ─── Income & Expense ↔ Google Sheets: sync after every local change ───────
+  // The I&E module writes through updateState(), so this centralized watcher
+  // catches create/edit/delete/import changes as well as changes made by the
+  // investment modules when they update linked I&E entries.
+  useEffect(() => {
+    const snapshot = JSON.stringify(serializeIncomeExpense(state));
+
+    // Establish the baseline for the already-loaded local state. This avoids
+    // treating the initial render itself as a user edit.
+    if (incomeExpenseSnapshotRef.current === null) {
+      incomeExpenseSnapshotRef.current = snapshot;
+      return;
+    }
+
+    if (incomeExpenseSnapshotRef.current === snapshot) return;
+    incomeExpenseSnapshotRef.current = snapshot;
+
+    // A remote Sheets pull changes React state too, but it must NOT be pushed
+    // straight back to Sheets. The pull is already the authoritative result.
+    if (suppressNextIncomeExpenseSyncRef.current) {
+      suppressNextIncomeExpenseSyncRef.current = false;
+      return;
+    }
+
+    markDirty('incomeExpense');
+    schedulePush('incomeExpense', () => serializeIncomeExpense(latestStateRef.current));
+  }, [
+    state.incomeExpenseTransactions,
+    state.incomeExpenseAccounts,
+    state.incomeExpenseCategories,
+    state.conversionRates,
+  ]);
 
   // Inactivity timer (3 minutes)
   useEffect(() => {
@@ -107,19 +189,20 @@ useEffect(() => {
     };
   }, [state.isLocked, updateState]);
 
-  const [historyRange, setHistoryRange] = useState<'all' | 'last12m' | 'fiscal' | 'custom'>('all');
-  // Custom range: default to first of current month → today
+  const [historyRange, setHistoryRange] = useState<'this' | 'fiscal' | 'custom'>('custom');
   const [historyCustomDates, setHistoryCustomDates] = useState(() => {
-    const now = new Date();
     return {
-      start: getFirstOfMonth(now),
+      start: '2024-01-01',
       end: getTodayStr(),
     };
   });
-  // Track the "anchor" month for < > navigation (year + month index)
-  const [customNavMonth, setCustomNavMonth] = useState<{ year: number; month: number }>(() => {
+  const [historyThisMonthDate, setHistoryThisMonthDate] = useState(() => {
     const now = new Date();
-    return { year: now.getFullYear(), month: now.getMonth() };
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
+  const [historyFiscalStartYear, setHistoryFiscalStartYear] = useState(() => {
+    const now = new Date();
+    return now.getMonth() >= 6 ? now.getFullYear() : now.getFullYear() - 1;
   });
 
   const [isRangeMenuOpen, setIsRangeMenuOpen] = useState(false);
@@ -135,17 +218,55 @@ useEffect(() => {
   type SyncStatus = 'idle' | 'syncing' | 'success' | 'error';
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle');
   const [lastSyncedAt, setLastSyncedAt] = useState<number>(() => {
-    // Use the oldest lastSyncedAt across all modules as the global "last synced"
-    const modules = ['onlineInvestments', 'sukuk', 'mutualFunds', 'fixedDeposits'] as const;
+    // Use the most recent lastSyncedAt across all modules as the global "last synced"
+    const modules = ['onlineInvestments', 'sukuk', 'mutualFunds', 'fixedDeposits', 'incomeExpense', 'dse'] as const;
     const times = modules.map(m => {
       try {
         const raw = localStorage.getItem(`syncmeta_${m}`);
         return raw ? JSON.parse(raw).lastSyncedAt ?? 0 : 0;
       } catch { return 0; }
     });
-    return Math.min(...times.filter(t => t > 0)) || 0;
+    return Math.max(...times.filter(t => t > 0)) || 0;
   });
   const [syncSummary, setSyncSummary] = useState<string>('');
+
+  // Listen to instant sync events from any module
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
+    const handleSyncStatus = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (!detail) return;
+      if (detail.status === 'syncing') {
+        setSyncStatus('syncing');
+        setSyncSummary('Syncing with Google Sheets...');
+      } else if (detail.status === 'success') {
+        setSyncStatus('success');
+        setSyncSummary(detail.message || 'Saved to Google Sheets.');
+        if (detail.lastSyncedAt) {
+          setLastSyncedAt(detail.lastSyncedAt);
+        }
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          setSyncStatus('idle');
+          setSyncSummary('');
+        }, 3000);
+      } else if (detail.status === 'error') {
+        setSyncStatus('error');
+        setSyncSummary(detail.message || 'Google Sheets sync failed.');
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          setSyncStatus('idle');
+          setSyncSummary('');
+        }, 4000);
+      }
+    };
+
+    window.addEventListener('app-sync-status', handleSyncStatus);
+    return () => {
+      window.removeEventListener('app-sync-status', handleSyncStatus);
+      clearTimeout(timer);
+    };
+  }, []);
 
 const dashboardBackupRef = useRef<HTMLInputElement>(null);
   const [dashboardPendingRestore, setDashboardPendingRestore] = useState<AppState | null>(null);
@@ -222,78 +343,68 @@ const handleDashboardRestoreFile = (event: React.ChangeEvent<HTMLInputElement>) 
   const handleSyncAll = useCallback(async () => {
     if (syncStatus === 'syncing') return;
     setSyncStatus('syncing');
-    setSyncSummary('');
+    setSyncSummary('Syncing with Google Sheets...');
 
     try {
+      const demoIds = ['1', '2', 'completed-1', 'completed-2', 'mf1', 'mf2', 'fdr1', 'fdr2', 's1', 's2', 'ol1', 'ol2'];
+
       const { pushed, pulled, failed } = await syncAllModules(
-       () => ({
-  onlineInvestments: state.onlineInvestments,
-  sukuk:             state.sukuks,
-  mutualFunds:       state.mutualFunds,
-  fixedDeposits:     state.fdrs,
+        () => {
+          const cur = latestStateRef.current;
+          let dseData: any[] = [];
+          try {
+            const raw = localStorage.getItem('sheet_cache_dse');
+            if (raw) dseData = JSON.parse(raw);
+          } catch {}
 
-  incomeExpense: [
-    ...state.incomeExpenseTransactions.map(t => ({
-      id: t.id,
-      type: 'transaction',
-      data: t
-    })),
-
-    ...state.incomeExpenseAccounts.map(a => ({
-      id: a.id,
-      type: 'account',
-      data: a
-    })),
-
-    ...state.incomeExpenseCategories.map(c => ({
-      id: c.id,
-      type: 'category',
-      data: c
-    })),
-
-    {
-      id: '__INCOME_EXPENSE_SETTINGS__',
-      type: 'settings',
-      data: {
-        conversionRates: state.conversionRates
-      }
-    }
-  ]
-}),
+          return {
+            onlineInvestments: cur.onlineInvestments,
+            sukuk:             cur.sukuks,
+            mutualFunds:       cur.mutualFunds,
+            fixedDeposits:     cur.fdrs,
+            incomeExpense:     serializeIncomeExpense(cur),
+            dse:               dseData,
+          };
+        },
         (module, data) => {
           if (data === null) return;
-          // Cloud was newer — apply to local state
-          if (module === 'onlineInvestments') updateState(s => ({ ...s, onlineInvestments: data }), []);
-          if (module === 'sukuk')             updateState(s => ({ ...s, sukuks: data }), []);
-          if (module === 'mutualFunds')       updateState(s => ({ ...s, mutualFunds: data }), []);
-          if (module === 'fixedDeposits')     updateState(s => ({ ...s, fdrs: data }), []);
-          if (module === 'incomeExpense') {
-
-  const rows = data || [];
-
-  const transactions = rows
-    .filter((r: any) => r.type === 'transaction')
-    .map((r: any) => r.data);
-
-  const accounts = rows
-    .filter((r: any) => r.type === 'account')
-    .map((r: any) => r.data);
-
-  const categories = rows
-    .filter((r: any) => r.type === 'category')
-    .map((r: any) => r.data);
-
-  const settingsRow = rows.find((r: any) => r.type === 'settings');
-
-  updateState(s => ({
-    ...s,
-    incomeExpenseTransactions: transactions,
-    incomeExpenseAccounts: accounts,
-    incomeExpenseCategories: categories,
-    conversionRates:
-      settingsRow?.data?.conversionRates || s.conversionRates
-  }), []);
-}
+          // Cloud was newer — apply to local state without re-marking dirty
+          if (module === 'onlineInvestments') {
+            const filtered = data.filter((item: any) => !demoIds.includes(item.id));
+            updateState(s => ({ ...s, onlineInvestments: filtered }), []);
+          } else if (module === 'sukuk') {
+            const filtered = data.filter((item: any) => !demoIds.includes(item.id));
+            updateState(s => ({ ...s, sukuks: filtered }), []);
+          } else if (module === 'mutualFunds') {
+            const filtered = data.filter((item: any) => !demoIds.includes(item.id));
+            updateState(s => ({ ...s, mutualFunds: filtered }), []);
+          } else if (module === 'fixedDeposits') {
+            const filtered = data.filter((item: any) => !demoIds.includes(item.id));
+            updateState(s => ({ ...s, fdrs: filtered }), []);
+          } else if (module === 'incomeExpense') {
+            const parsed = deserializeIncomeExpense(data);
+            if (parsed) {
+              suppressNextIncomeExpenseSyncRef.current = true;
+              updateState(s => ({
+                ...s,
+                incomeExpenseTransactions: parsed.transactions || [],
+                incomeExpenseAccounts: parsed.accounts && parsed.accounts.length > 0 ? parsed.accounts : s.incomeExpenseAccounts,
+                incomeExpenseCategories: parsed.categories && parsed.categories.length > 0 ? parsed.categories : s.incomeExpenseCategories,
+                conversionRates: parsed.conversionRates || s.conversionRates,
+              }), []);
+            }
+          } else if (module === 'dse') {
+            if (Array.isArray(data) && data.length > 0) {
+              const settingsRow = data.find((r: any) => r && r.type === '__SETTINGS__');
+              if (settingsRow?.settings) {
+                localStorage.setItem('dse_settings', JSON.stringify(settingsRow.settings));
+              }
+              const cleanTransactions = data.filter((r: any) => r && r.type !== '__SETTINGS__');
+              localStorage.setItem('sheet_cache_dse', JSON.stringify(cleanTransactions));
+              setDseTransactions(cleanTransactions);
+              window.dispatchEvent(new Event('storage'));
+            }
+          }
         }
       );
 
@@ -304,7 +415,7 @@ const handleDashboardRestoreFile = (event: React.ChangeEvent<HTMLInputElement>) 
       if (pushed.length) parts.push(`↑ Pushed ${pushed.length}`);
       if (pulled.length) parts.push(`↓ Pulled ${pulled.length}`);
       if (failed.length) parts.push(`✗ Failed ${failed.length}`);
-      setSyncSummary(parts.join('  ·  ') || 'Already up to date');
+      setSyncSummary(parts.join('  ·  ') || 'Synced with Google Sheets');
       setSyncStatus(failed.length > 0 ? 'error' : 'success');
     } catch {
       setSyncSummary('Sync failed — check connection');
@@ -316,7 +427,7 @@ const handleDashboardRestoreFile = (event: React.ChangeEvent<HTMLInputElement>) 
       setSyncStatus('idle');
       setSyncSummary('');
     }, 4000);
-  }, [syncStatus, state, updateState]);
+  }, [syncStatus, updateState]);
 
   // ─── Cleanup: Remove known demo data if present ──────────────────────────────
   useEffect(() => {
@@ -337,7 +448,7 @@ const handleDashboardRestoreFile = (event: React.ChangeEvent<HTMLInputElement>) 
       newState.sukuks = filter(s.sukuks);
 
       return changed ? newState : s;
-    });
+    }, []);
   }, []);
 
   // ─── DSE transactions from localStorage ───────────────────────────────────
@@ -379,210 +490,69 @@ useEffect(() => {
   };
 }, [DSE_CACHE_KEY]);
 
-  // App.tsx around line 125
-// ─── On startup: resolve local vs cloud conflict for each module ───────────
+  // ─── 1. Startup Synchronization & Close Flush ─────────────────────────────
   useEffect(() => {
-    const demoIds = ['1', '2', 'completed-1', 'completed-2', 'mf1', 'mf2', 'fdr1', 'fdr2', 's1', 's2', 'ol1', 'ol2'];
+    // When the app loads for the first time in any session:
+    // Local data is loaded immediately from localStorage.
+    // Simultaneously, compare local data with Google Sheets data and pull or push based on which has been updated most recently.
+    handleSyncAll();
 
-    const moduleConfig: { module: ModuleKey; stateKey: keyof AppState }[] = [
-      { module: 'fixedDeposits',     stateKey: 'fdrs'              },
-      { module: 'mutualFunds',       stateKey: 'mutualFunds'       },
-      { module: 'onlineInvestments', stateKey: 'onlineInvestments' },
-      { module: 'sukuk',             stateKey: 'sukuks'            },
-    ];
+    // Just at the time of closing: check and push the latest updates if dirty
+    flushOnUnload(() => {
+      const cur = latestStateRef.current;
+      let dseData: any[] = [];
+      try {
+        const raw = localStorage.getItem('sheet_cache_dse');
+        if (raw) dseData = JSON.parse(raw);
+      } catch {}
 
-resolveOnStartup(
-  'incomeExpense',
-
-  [
-    ...state.incomeExpenseTransactions.map(t => ({
-      id: t.id,
-      type: 'transaction',
-      data: t
-    })),
-
-    ...state.incomeExpenseAccounts.map(a => ({
-      id: a.id,
-      type: 'account',
-      data: a
-    })),
-
-    ...state.incomeExpenseCategories.map(c => ({
-      id: c.id,
-      type: 'category',
-      data: c
-    })),
-
-    {
-      id: '__INCOME_EXPENSE_SETTINGS__',
-      type: 'settings',
-      data: {
-        conversionRates: state.conversionRates
-      }
-    }
-  ],
-
-  () => [
-    ...latestStateRef.current.incomeExpenseTransactions.map(t => ({
-      id: t.id,
-      type: 'transaction',
-      data: t
-    })),
-
-    ...latestStateRef.current.incomeExpenseAccounts.map(a => ({
-      id: a.id,
-      type: 'account',
-      data: a
-    })),
-
-    ...latestStateRef.current.incomeExpenseCategories.map(c => ({
-      id: c.id,
-      type: 'category',
-      data: c
-    })),
-
-    {
-      id: '__INCOME_EXPENSE_SETTINGS__',
-      type: 'settings',
-      data: {
-        conversionRates: latestStateRef.current.conversionRates
-      }
-    }
-  ]
-
-).then(cloudData => {
-
-  if (!cloudData) return;
-
-  const transactions = cloudData
-    .filter((r: any) => r.type === 'transaction')
-    .map((r: any) => r.data);
-
-  const accounts = cloudData
-    .filter((r: any) => r.type === 'account')
-    .map((r: any) => r.data);
-
-  const categories = cloudData
-    .filter((r: any) => r.type === 'category')
-    .map((r: any) => r.data);
-
-  const settingsRow = cloudData.find((r: any) => r.type === 'settings');
-
-  updateState(s => ({
-    ...s,
-    incomeExpenseTransactions: transactions,
-    incomeExpenseAccounts: accounts,
-    incomeExpenseCategories: categories,
-    conversionRates:
-      settingsRow?.data?.conversionRates || s.conversionRates
-  }), []);
-});
-
-    moduleConfig.forEach(({ module, stateKey }) => {
-    resolveOnStartup(
-      module,
-      (state as any)[stateKey] ?? [],
-      () => ((state as any)[stateKey] ?? []).filter((item: any) => !demoIds.includes(item.id))
-    ).then(cloudData => {
-      if (cloudData !== null) {
-        const filtered = cloudData.filter((item: any) => !demoIds.includes(item.id));
-        const localData = (state as any)[stateKey] ?? [];
-        if (filtered.length > 0 || localData.length === 0) {
-          updateState(s => ({ ...s, [stateKey]: filtered }), []);
-        }
-      }
+      return {
+        onlineInvestments: cur.onlineInvestments,
+        sukuk:             cur.sukuks,
+        mutualFunds:       cur.mutualFunds,
+        fixedDeposits:     cur.fdrs,
+        incomeExpense:     serializeIncomeExpense(cur),
+        dse:               dseData,
+      };
     });
-  });
-
-    // Register beforeunload flush
-    flushOnUnload(() => ({
-  fixedDeposits:     state.fdrs,
-  mutualFunds:       state.mutualFunds,
-  onlineInvestments: state.onlineInvestments,
-  sukuk:             state.sukuks,
-
-  incomeExpense: [
-
-    ...state.incomeExpenseTransactions.map(t => ({
-      id: t.id,
-      type: 'transaction',
-      data: t
-    })),
-
-    ...state.incomeExpenseAccounts.map(a => ({
-      id: a.id,
-      type: 'account',
-      data: a
-    })),
-
-    ...state.incomeExpenseCategories.map(c => ({
-      id: c.id,
-      type: 'category',
-      data: c
-    })),
-
-    {
-      id: '__INCOME_EXPENSE_SETTINGS__',
-      type: 'settings',
-      data: {
-        conversionRates: state.conversionRates
-      }
-    }
-  ]
-}));
-
-
-        // Start auto sync using ALWAYS-LATEST state
-    startAutoSync(() => ({
-  fixedDeposits: latestStateRef.current.fdrs,
-  mutualFunds: latestStateRef.current.mutualFunds,
-  onlineInvestments: latestStateRef.current.onlineInvestments,
-  sukuk: latestStateRef.current.sukuks,
-
-  incomeExpense: [
-
-    ...latestStateRef.current.incomeExpenseTransactions.map(t => ({
-      id: t.id,
-      type: 'transaction',
-      data: t
-    })),
-
-    ...latestStateRef.current.incomeExpenseAccounts.map(a => ({
-      id: a.id,
-      type: 'account',
-      data: a
-    })),
-
-    ...latestStateRef.current.incomeExpenseCategories.map(c => ({
-      id: c.id,
-      type: 'category',
-      data: c
-    })),
-
-    {
-      id: '__INCOME_EXPENSE_SETTINGS__',
-      type: 'settings',
-      data: {
-        conversionRates: latestStateRef.current.conversionRates
-      }
-    }
-  ]
-}));
-    
   }, []);
 
+  // ─── 2. Auto-sync every 5 minutes: check and push/pull latest update ───────
+  useEffect(() => {
+    const FIVE_MINUTES = 5 * 60 * 1000;
+    const interval = setInterval(() => {
+      handleSyncAll();
+    }, FIVE_MINUTES);
+
+    return () => clearInterval(interval);
+  }, [handleSyncAll]);
 
 
 
 
-  // ─── When historyRange switches to 'custom', reset to current month ────────
-  const handleRangeChange = (newRange: 'all' | 'last12m' | 'fiscal' | 'custom') => {
+
+  const navigateHistoryCustomMonth = (offset: number) => {
+    const currentStart = new Date(historyCustomDates.start);
+    const nextMonth = new Date(currentStart.getFullYear(), currentStart.getMonth() + offset, 1);
+    const now = new Date();
+    const isCurrentMonth =
+      nextMonth.getFullYear() === now.getFullYear() &&
+      nextMonth.getMonth() === now.getMonth();
+
+    setHistoryCustomDates({
+      start: getFirstOfMonth(nextMonth),
+      end: isCurrentMonth ? getTodayStr() : getLastOfMonth(nextMonth),
+    });
+  };
+
+  const navigateHistoryThisMonth = (offset: number) => {
+    setHistoryThisMonthDate(prev => new Date(prev.getFullYear(), prev.getMonth() + offset, 1));
+  };
+
+  const handleRangeChange = (newRange: 'this' | 'fiscal' | 'custom') => {
     if (newRange === 'custom') {
-      const now = new Date();
-      const navMonth = { year: now.getFullYear(), month: now.getMonth() };
-      setCustomNavMonth(navMonth);
       setHistoryCustomDates({
-        start: getFirstOfMonth(now),
+        start: '2024-01-01',
         end: getTodayStr(),
       });
     }
@@ -590,49 +560,66 @@ resolveOnStartup(
     setIsRangeMenuOpen(false);
   };
 
-  // ─── Navigate custom range by month ───────────────────────────────────────
-  const navigateCustomMonth = (direction: -1 | 1) => {
-    const now = new Date();
-    const newMonth = customNavMonth.month + direction;
-    let year = customNavMonth.year;
-    let month = newMonth;
-    if (month < 0) { month = 11; year -= 1; }
-    if (month > 11) { month = 0; year += 1; }
-    const navDate = new Date(year, month, 1);
-    const isCurrentMonth = year === now.getFullYear() && month === now.getMonth();
-    setCustomNavMonth({ year, month });
-    setHistoryCustomDates({
-      start: getFirstOfMonth(navDate),
-      end: isCurrentMonth ? getTodayStr() : getLastOfMonth(navDate),
-    });
+  const formatHistoryThisMonthLabel = (d: Date) => {
+    const months = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    return `${months[d.getMonth()]} ${d.getFullYear()}`;
   };
 
   const onlineInvestments = state.onlineInvestments;
   const sukuks = state.sukuks;
 
   // ─── Shared date range resolver ────────────────────────────────────────────
-  const { startStr, endStr } = useMemo(() => {
-    const now = new Date();
-
-    if (historyRange === 'all') {
-      return { startStr: '0000-01-01', endStr: '9999-12-31' };
-    }
-    if (historyRange === 'last12m') {
+  const rangeDates = useMemo(() => {
+    if (historyRange === 'this') {
       return {
-        startStr: toDateStr(new Date(now.getFullYear(), now.getMonth() - 11, 1)),
-        endStr: toDateStr(new Date(now.getFullYear(), now.getMonth() + 1, 0)),
+        start: new Date(
+          historyThisMonthDate.getFullYear(),
+          historyThisMonthDate.getMonth(),
+          1
+        ),
+        end: new Date(
+          historyThisMonthDate.getFullYear(),
+          historyThisMonthDate.getMonth() + 1,
+          0,
+          23, 59, 59, 999
+        )
       };
     }
+
     if (historyRange === 'fiscal') {
-      const sy = now.getMonth() >= 6 ? now.getFullYear() - 1 : now.getFullYear() - 2;
-      return { startStr: `${sy}-07-01`, endStr: `${sy + 1}-06-30` };
+      return {
+        start: new Date(historyFiscalStartYear, 6, 1),
+        end: new Date(historyFiscalStartYear + 1, 5, 30, 23, 59, 59, 999)
+      };
     }
-    // custom
+
+    const start = historyCustomDates.start
+      ? new Date(historyCustomDates.start)
+      : new Date(0);
+    const end = historyCustomDates.end
+      ? new Date(historyCustomDates.end)
+      : new Date();
+
+    start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
+
+    return { start, end };
+  }, [
+    historyRange,
+    historyCustomDates,
+    historyThisMonthDate,
+    historyFiscalStartYear
+  ]);
+
+  const { startStr, endStr } = useMemo(() => {
     return {
-      startStr: historyCustomDates.start || '0000-01-01',
-      endStr: historyCustomDates.end || '9999-12-31',
+      startStr: toDateStr(rangeDates.start),
+      endStr: toDateStr(rangeDates.end),
     };
-  }, [historyRange, historyCustomDates]);
+  }, [rangeDates]);
 
   // ─── "Same date last year" range for year-over-year comparison ────────────
   const { lyStartStr, lyEndStr } = useMemo(() => {
@@ -650,6 +637,9 @@ resolveOnStartup(
   }, [startStr, endStr]);
 
   // ─── Core stats computation (reusable for both current and last-year) ──────
+  const globalUsdRate = state.conversionRates?.USD_to_BDT ?? 120;
+  const globalLydRate = state.conversionRates?.LYD_to_BDT ?? 20;
+
   const computeStats = (
     effectiveStartStr: string,
     effectiveEndStr: string,
@@ -695,8 +685,8 @@ resolveOnStartup(
         if (t.type === 'Withdrawal') return sum + t.amount;
         return sum;
       }, 0);
-      const currentHolding = cumulativeDeposit + cumulativeDividends - cumulativeSellAmount - cumulativeWithdrawn;
-      const activeInvestment = cumulativeDeposit - cumulativeWithdrawn - cumulativeSellAmount;
+      const currentHolding = cumulativeDeposit + cumulativeDividends + cumulativeSellAmount - cumulativeWithdrawn;
+      const activeInvestment = cumulativeDeposit - cumulativeWithdrawn;
       const rangeDeposit = f.transactions.reduce((sum, t) => {
         if (!inRange(t.date)) return sum;
         if ((t.type === 'Buy' || t.type === 'Dividend') && !t.isDividend) return sum + (t.sipAmount || 0);
@@ -718,7 +708,7 @@ resolveOnStartup(
     // ── FIXED DEPOSITS ──
     let fdrInvestedTotal = 0, fdrActiveTotal = 0, fdrHoldingTotal = 0, fdrProfitRangeTotal = 0;
     state.fdrs.forEach(f => {
-      const rate = f.currency === 'USD' ? (f.exchangeRate || 110) : 1;
+      const rate = f.currency === 'USD' ? globalUsdRate : (f.currency === 'LYD' ? globalLydRate : 1);
       if (inRange(f.investmentDate)) fdrInvestedTotal += f.principal * rate;
       const openedBeforeEnd = beforeEnd(f.investmentDate);
       const isClosedByEnd = f.status === 'Closed' && f.closingDate && f.closingDate <= effectiveEndStr;
@@ -739,7 +729,7 @@ resolveOnStartup(
         const bal = (isClosedByEnd && f.withdrawBalance != null)
           ? Math.max(0, computedBal - f.withdrawBalance)
           : computedBal;
-        fdrHoldingTotal += bal * rate;
+        if (bal > 0) fdrHoldingTotal += bal * rate;
         fdrProfitRangeTotal += (fProfitRange - fChargeRange) * rate;
       }
     });
@@ -751,7 +741,7 @@ resolveOnStartup(
 
     // ── ONLINE INVESTMENTS ──
     const olStats = state.onlineInvestments.map(inv => {
-      const rate = inv.currency === 'USD' ? 110 : 1;
+      const rate = inv.currency === 'USD' ? globalUsdRate : (inv.currency === 'LYD' ? globalLydRate : 1);
       let isHolding = false;
       if (beforeEnd(inv.investmentDate)) {
         const status = getOnlineStatus(inv);
@@ -785,7 +775,6 @@ resolveOnStartup(
 
     // ── SUKUK ──
     const skStats = state.sukuks.map(inv => {
-      let isActive = false;
       let holding = 0;
       if (beforeEnd(inv.issueDate)) {
         const maturityDate = new Date(inv.issueDate);
@@ -794,12 +783,10 @@ resolveOnStartup(
         const closingStr = (inv as any).closingDate;
         const effectiveClosingStr = closingStr || maturityStr;
         if (effectiveClosingStr >= effectiveEndStr) {
-          isActive = true;
           holding = inv.principalAmount;
         } else {
           const withdrawBalance = (inv as any).withdrawBalance;
           if (withdrawBalance === undefined || withdrawBalance < inv.principalAmount) {
-            isActive = true;
             holding = inv.principalAmount - (withdrawBalance || 0);
           }
         }
@@ -811,7 +798,7 @@ resolveOnStartup(
       }, 0);
       return {
         holding,
-        active: isActive ? inv.principalAmount : 0,
+        active: holding,
         investedRange: inRange(inv.issueDate) ? inv.principalAmount : 0,
         profitRange
       };
@@ -823,11 +810,11 @@ resolveOnStartup(
     const skTotalProfit    = skStats.reduce((sum, s) => sum + s.profitRange, 0);
 
     // ── DSE ──
-    const typePriority: Record<string, number> = { Deposit: 1, Buy: 2, Dividend: 3, Sell: 4, Charge: 5 };
+    const typePriority: Record<string, number> = { Deposit: 0, Buy: 1, Dividend: 2, Charge: 3, Sell: 4, Withdrawal: 5 };
     const dseSorted = [...dseTxns].sort((a, b) => {
       const dateDiff = new Date(a.date).getTime() - new Date(b.date).getTime();
       if (dateDiff !== 0) return dateDiff;
-      return (typePriority[a.type] || 99) - (typePriority[b.type] || 99);
+      return (typePriority[a.type] ?? 9) - (typePriority[b.type] ?? 9);
     });
 
     let dT_Dep = 0, dT_Wd = 0, dT_Div = 0, dT_Chg = 0, dT_PnL = 0;
@@ -858,7 +845,7 @@ resolveOnStartup(
         const h = dHoldings[key];
         if (h.qty > 0) {
           const avgCost = h.totalCost / h.qty;
-          const costOfSold = t.qty * avgCost;
+          const costOfSold = Math.min(t.qty, h.qty) * avgCost;
           const pnl = t.total - costOfSold;
           dT_PnL += pnl;
           if (inRange(t.date)) dR_PnL += pnl;
@@ -875,12 +862,189 @@ resolveOnStartup(
     const dseTotalInvested  = dR_Dep;
     const dseTotalProfit    = dR_PnL + dR_Div - dR_Chg;
 
-    const totalActiveInvestment = mfActiveInvested + fdrActiveInvested + olActiveInvested + skActiveInvested + dseActiveInvested;
-    const totalNetWorth = mfCurrentHolding + fdrCurrentHolding + olCurrentHolding + skCurrentHolding + dseCurrentHolding;
-    const totalInvested = mfTotalInvested  + fdrTotalInvested  + olTotalInvested  + skTotalInvested  + dseTotalInvested;
-    const totalProfit   = mfTotalProfit    + fdrTotalProfit    + olTotalProfit    + skTotalProfit    + dseTotalProfit;
+    // ── INCOME & EXPENSE / ACCOUNTS BALANCE IN BDT ──
+    const accounts = state.incomeExpenseAccounts || [];
+    const transactions = state.incomeExpenseTransactions || [];
+    const initialBalanceTransactions = accounts
+      .filter(acc => !acc.isParent && acc.initialBalance && acc.initialBalance > 0)
+      .map(acc => ({
+        id: `init-bal-${acc.id}`,
+        date: acc.initialDate || '2026-05-01',
+        amount: acc.initialBalance,
+        type: 'Income' as const,
+        accountId: acc.id,
+        category: 'Initial Balance',
+        subCategory: 'Starting Balance',
+        description: `Initial Balance - ${acc.name}`
+      }));
+    const allAccountTxs = [...transactions, ...initialBalanceTransactions];
+    const USD_rate = globalUsdRate;
+    const LYD_rate = globalLydRate;
 
-    return { totalNetWorth, totalActiveInvestment, totalInvested, totalProfit };
+    const balances: Record<string, number> = {};
+    accounts.forEach(acc => {
+      const txs = allAccountTxs.filter(t => beforeEnd(t.date) && (t.accountId === acc.id || t.toAccountId === acc.id));
+      const income = txs.filter(t => t.type === 'Income' && t.accountId === acc.id).reduce((s, t) => s + t.amount, 0);
+      const expense = txs.filter(t => t.type === 'Expense' && t.accountId === acc.id).reduce((s, t) => s + t.amount, 0);
+      let transOut = 0;
+      let transIn = 0;
+      txs.forEach(t => {
+        if (t.type === 'Transfer') {
+          if (t.transferType) {
+            if (t.accountId === acc.id) {
+              if (t.transferType === 'from') transOut += t.amount;
+              else if (t.transferType === 'to') transIn += t.amount;
+            }
+          } else {
+            if (t.accountId === acc.id) transOut += t.amount;
+            if (t.toAccountId === acc.id) transIn += (t.toAmount !== undefined ? t.toAmount : t.amount);
+          }
+        }
+      });
+      const loanInflow = txs.filter(t => (t.type === 'Loan' || t.category === 'Loan') && t.accountId === acc.id && (t.subCategory === 'Borrowed' || t.subCategory === 'Received Lent Money')).reduce((s, t) => s + t.amount, 0);
+      const loanOutflow = txs.filter(t => (t.type === 'Loan' || t.category === 'Loan') && t.accountId === acc.id && (t.subCategory === 'Lent' || t.subCategory === 'Repaid Borrowed Money')).reduce((s, t) => s + t.amount, 0);
+      balances[acc.id] = income - expense - transOut + transIn + loanInflow - loanOutflow;
+    });
+
+    accounts.forEach(acc => {
+      if (acc.isParent) {
+        const children = accounts.filter(a => a.parentId === acc.id);
+        const childrenSum = children.reduce((s, c) => s + (balances[c.id] || 0), 0);
+        balances[acc.id] = (balances[acc.id] || 0) + childrenSum;
+      }
+    });
+
+    const totalBDT = accounts
+      .filter(a => a.currency === 'BDT' && !a.parentId)
+      .reduce((sum, a) => sum + (balances[a.id] || 0), 0);
+    const totalLYD = accounts
+      .filter(a => a.currency === 'LYD' && !a.parentId)
+      .reduce((sum, a) => sum + (balances[a.id] || 0), 0);
+    const totalUSD = accounts
+      .filter(a => a.currency === 'USD' && !a.parentId)
+      .reduce((sum, a) => sum + (balances[a.id] || 0), 0);
+
+    const loanStatsByCurr = {
+      BDT: { borrowed: 0, repaid: 0, lent: 0, received: 0 },
+      LYD: { borrowed: 0, repaid: 0, lent: 0, received: 0 },
+      USD: { borrowed: 0, repaid: 0, lent: 0, received: 0 },
+    };
+
+    allAccountTxs.forEach(t => {
+      if (!beforeEnd(t.date)) return;
+      if (t.type !== 'Loan' && t.category !== 'Loan') return;
+      const acc = accounts.find(a => a.id === t.accountId);
+      if (!acc) return;
+      const currency = acc.currency as 'BDT' | 'LYD' | 'USD';
+      if (!loanStatsByCurr[currency]) return;
+      if (t.subCategory === 'Borrowed') loanStatsByCurr[currency].borrowed += t.amount;
+      else if (t.subCategory === 'Repaid Borrowed Money') loanStatsByCurr[currency].repaid += t.amount;
+      else if (t.subCategory === 'Lent') loanStatsByCurr[currency].lent += t.amount;
+      else if (t.subCategory === 'Received Lent Money') loanStatsByCurr[currency].received += t.amount;
+    });
+
+    const totalCurrentBorrowedBDT = Math.max(0, loanStatsByCurr.BDT.borrowed - loanStatsByCurr.BDT.repaid)
+      + Math.max(0, loanStatsByCurr.LYD.borrowed - loanStatsByCurr.LYD.repaid) * LYD_rate
+      + Math.max(0, loanStatsByCurr.USD.borrowed - loanStatsByCurr.USD.repaid) * USD_rate;
+
+    const totalCurrentLentBDT = Math.max(0, loanStatsByCurr.BDT.lent - loanStatsByCurr.BDT.received)
+      + Math.max(0, loanStatsByCurr.LYD.lent - loanStatsByCurr.LYD.received) * LYD_rate
+      + Math.max(0, loanStatsByCurr.USD.lent - loanStatsByCurr.USD.received) * USD_rate;
+
+    const rawSum = totalBDT + (totalLYD * LYD_rate) + (totalUSD * USD_rate);
+    const totalBalanceInBDT = rawSum - totalCurrentBorrowedBDT + totalCurrentLentBDT;
+
+    const totalInvestmentHolding = dseCurrentHolding + mfCurrentHolding + fdrCurrentHolding + olCurrentHolding + skCurrentHolding;
+    const totalNetWorth         = totalBalanceInBDT;
+    const totalActiveInvestment = dseActiveInvested + mfActiveInvested + fdrActiveInvested + olActiveInvested + skCurrentHolding;
+    const totalInvested         = dseTotalInvested  + mfTotalInvested  + fdrTotalInvested  + olTotalInvested  + skTotalInvested;
+    const totalProfit           = dseTotalProfit    + mfTotalProfit    + fdrTotalProfit    + olTotalProfit    + skTotalProfit;
+
+    const isInvestmentAcc = (acc: any, allAccs: any[]) => {
+      if (!acc) return false;
+      if (acc.id === 'bdt-investments') return true;
+      if (acc.parentId) {
+        const parent的的 = allAccs.find(a => a.id === acc.parentId);
+        if (parent的的 && (parent的的.id === 'bdt-investments' || parent的的.name.toLowerCase().includes('invest'))) return true;
+      }
+      const id = (acc.id || '').toLowerCase();
+      const name = (acc.name || '').toLowerCase();
+      return (
+        id === 'bdt-investments' ||
+        id.includes('investment') ||
+        id.includes('bo-account') ||
+        id.includes('mutual-fund') ||
+        id.includes('sukuk') ||
+        id.includes('fdr') ||
+        id.includes('online-invest') ||
+        name === 'investments' ||
+        name.includes('investment') ||
+        name.includes('bo account') ||
+        name.includes('online investment') ||
+        name.includes('mutual fund') ||
+        name.includes('sukuk') ||
+        name.includes('fdr')
+      );
+    };
+
+    const totalExpenseBDT = allAccountTxs
+      .filter(t => beforeEnd(t.date) && t.type === 'Expense')
+      .reduce((sum, t) => {
+        const acc = accounts.find(a => a.id === t.accountId);
+        const mult = acc?.currency === 'USD' ? USD_rate : acc?.currency === 'LYD' ? LYD_rate : 1;
+        return sum + (t.amount * mult);
+      }, 0);
+
+    const totalIncomeBDT = allAccountTxs
+      .filter(t => beforeEnd(t.date) && t.type === 'Income')
+      .reduce((sum, t) => {
+        const acc主管 = accounts.find(a => a.id === t.accountId);
+        const mult = acc主管?.currency === 'USD' ? USD_rate : acc主管?.currency === 'LYD' ? LYD_rate : 1;
+        return sum + (t.amount * mult);
+      }, 0);
+
+    const totalInvestmentAccBDT = accounts
+      .filter(acc => !acc.isParent && isInvestmentAcc(acc, accounts))
+      .reduce((sum, acc) => {
+        const bal = balances[acc.id] || 0;
+        const mult = acc.currency === 'USD' ? USD_rate : acc.currency === 'LYD' ? LYD_rate : 1;
+        return sum + (bal * mult);
+      }, 0);
+
+    const totalSavingBDT翼 = Math.max(0, totalIncomeBDT - totalExpenseBDT - totalInvestmentAccBDT);
+
+    const assetAllocationData = [
+      { name: 'Expense', value: Math.max(0, totalExpenseBDT), color: '#ef4444' },
+      { name: 'Saving', value: totalSavingBDT翼, color: '#2dd4bf' },
+      { name: 'Investment', value: Math.max(0, totalInvestmentAccBDT), color: '#3b82f6' },
+    ];
+
+    return {
+      totalNetWorth,
+      totalBalanceInBDT,
+      totalInvestmentHolding,
+      totalActiveInvestment,
+      totalInvested,
+      totalProfit,
+      assetAllocationData,
+      dseCurrentHolding,
+      mfCurrentHolding,
+      fdrCurrentHolding,
+      olCurrentHolding,
+      skCurrentHolding,
+      dseTotalInvested,
+      mfTotalInvested,
+      fdrTotalInvested,
+      olTotalInvested,
+      skTotalInvested,
+      dseTotalProfit,
+      mfTotalProfit,
+      fdrTotalProfit,
+      olTotalProfit,
+      skTotalProfit,
+      totalCurrentBorrowedBDT,
+      totalCurrentLentBDT,
+    };
   };
 
   const stats = useMemo(() => {
@@ -900,6 +1064,9 @@ resolveOnStartup(
     // ── Current period stats ──
     const current = computeStats(startStr, endStr, dseTransactions);
 
+    // ── Total (all-time, not scoped to the selected range) loan stats ──
+    const totalLoanStats = computeStats(startStr, getTodayStr(), dseTransactions);
+
     // ── Last year stats ──
     const lastYear = computeStats(lyStartStr, lyEndStr, dseTransactions);
 
@@ -909,105 +1076,28 @@ resolveOnStartup(
       return ((curr - prev) / Math.abs(prev)) * 100;
     };
 
-    const netWorthYoy    = yoyPct(current.totalNetWorth, lastYear.totalNetWorth);
-    const activeInvYoy   = yoyPct(current.totalActiveInvestment, lastYear.totalActiveInvestment);
-    const totalInvYoy    = yoyPct(current.totalInvested, lastYear.totalInvested);
-    const totalProfitYoy = yoyPct(current.totalProfit, lastYear.totalProfit);
+    const netWorthYoy          = yoyPct(current.totalNetWorth, lastYear.totalNetWorth);
+    const totalBalanceInBdtYoy = yoyPct(current.totalBalanceInBDT, lastYear.totalBalanceInBDT);
+    const investmentHoldingYoy = yoyPct(current.totalInvestmentHolding, lastYear.totalInvestmentHolding);
+    const activeInvYoy         = yoyPct(current.totalActiveInvestment, lastYear.totalActiveInvestment);
+    const totalInvYoy          = yoyPct(current.totalInvested, lastYear.totalInvested);
+    const totalProfitYoy       = yoyPct(current.totalProfit, lastYear.totalProfit);
 
     // ── Pie chart ──
-    const inRange2 = (date: string) => date >= startStr && date <= endStr;
-    const beforeEnd2 = (date: string) => date <= endStr;
+    const pieData = [
+      { name: 'DSE', value: current.dseCurrentHolding },
+      { name: 'Mutual Funds', value: current.mfCurrentHolding },
+      { name: 'Fixed Deposits', value: current.fdrCurrentHolding },
+      { name: 'Online', value: current.olCurrentHolding },
+      { name: 'Sukuk', value: current.skCurrentHolding },
+    ].filter(item => item.value > 0);
 
-    const typePriority: Record<string, number> = { Deposit: 1, Buy: 2, Dividend: 3, Sell: 4, Charge: 5 };
+    const typePriority: Record<string, number> = { Deposit: 0, Buy: 1, Dividend: 2, Charge: 3, Sell: 4, Withdrawal: 5 };
     const dseSorted = [...dseTransactions].sort((a, b) => {
       const dateDiff = new Date(a.date).getTime() - new Date(b.date).getTime();
       if (dateDiff !== 0) return dateDiff;
-      return (typePriority[a.type] || 99) - (typePriority[b.type] || 99);
+      return (typePriority[a.type] ?? 9) - (typePriority[b.type] ?? 9);
     });
-
-    // Re-derive holdings for pie chart (current period)
-    const dHoldings2: Record<string, { qty: number; totalCost: number }> = {};
-    let dT_Dep2 = 0, dT_Wd2 = 0, dT_Div2 = 0, dT_Chg2 = 0, dT_PnL2 = 0;
-    dseSorted.forEach(t => {
-      const key = `${t.portfolio}|${t.ticker}`;
-      if (t.type === 'Deposit') { if (beforeEnd2(t.date)) dT_Dep2 += Math.abs(t.total); }
-      else if (t.type === 'Withdrawal') { if (beforeEnd2(t.date)) dT_Wd2 += Math.abs(t.total); }
-      else if (t.type === 'Charge') { if (beforeEnd2(t.date)) dT_Chg2 += Math.abs(t.total); }
-      else if (t.type === 'Dividend') { if (beforeEnd2(t.date)) dT_Div2 += Math.abs(t.total); }
-      else if (t.type === 'Buy') {
-        if (!beforeEnd2(t.date)) return;
-        if (!dHoldings2[key]) dHoldings2[key] = { qty: 0, totalCost: 0 };
-        dHoldings2[key].qty += t.qty;
-        dHoldings2[key].totalCost += t.total;
-      } else if (t.type === 'Sell') {
-        if (!beforeEnd2(t.date)) return;
-        if (!dHoldings2[key]) dHoldings2[key] = { qty: 0, totalCost: 0 };
-        const h = dHoldings2[key];
-        if (h.qty > 0) {
-          const avgCost = h.totalCost / h.qty;
-          const costOfSold = t.qty * avgCost;
-          dT_PnL2 += t.total - costOfSold;
-          h.qty = Math.max(0, h.qty - t.qty);
-          h.totalCost = Math.max(0, h.totalCost - costOfSold);
-        }
-      }
-    });
-    const dStockHoldingCost2 = Object.values(dHoldings2).reduce((sum, h) => sum + h.totalCost, 0);
-    const dCashBalance2 = dT_Dep2 - dT_Wd2 - dStockHoldingCost2 + dT_PnL2 + dT_Div2 - dT_Chg2;
-    const dseCurrentHolding2 = dStockHoldingCost2 + dCashBalance2;
-
-    const mfCurrentHolding2 = state.mutualFunds.reduce((sum, f) => {
-      return sum + f.transactions.reduce((tSum, t) => {
-        if (!beforeEnd2(t.date)) return tSum;
-        if ((t.type === 'Buy' || t.type === 'Dividend') && !t.isDividend) return tSum + (t.sipAmount || 0);
-        if (t.isDividend) return tSum + (t.sipAmount || 0);
-        if (t.type === 'Sell' || t.type === 'Withdrawal') return tSum - t.amount;
-        return tSum;
-      }, 0);
-    }, 0);
-
-    const fdrCurrentHolding2 = state.fdrs.reduce((sum, f) => {
-      if (!beforeEnd2(f.investmentDate)) return sum;
-      const rate = f.currency === 'USD' ? (f.exchangeRate || 110) : 1;
-      const isClosedByEnd = f.status === 'Closed' && f.closingDate && f.closingDate <= endStr;
-      const addedProfit = f.transactions.filter(t => t.type === 'Profit' && t.handling === 'Added' && beforeEnd2(t.date)).reduce((p, t) => p + t.amount, 0);
-      const charges = f.transactions.filter(t => t.type === 'Charge' && beforeEnd2(t.date)).reduce((c, t) => c + t.amount, 0);
-      const computedBal = f.principal + addedProfit - charges;
-      const bal = (isClosedByEnd && f.withdrawBalance != null) ? Math.max(0, computedBal - f.withdrawBalance) : computedBal;
-      return sum + (bal * rate);
-    }, 0);
-
-    const olCurrentHolding2 = state.onlineInvestments.reduce((sum, inv) => {
-      const rate = inv.currency === 'USD' ? 110 : 1;
-      if (!beforeEnd2(inv.investmentDate)) return sum;
-      const status = getOnlineStatus(inv);
-      if (status !== 'Completed') return sum + inv.amount * rate;
-      const lastInst = inv.installments?.[inv.installments.length - 1];
-      const completionDate = lastInst ? (lastInst.actualDate || lastInst.date) : inv.maturityDate;
-      if (completionDate > endStr) return sum + inv.amount * rate;
-      return sum;
-    }, 0);
-
-    const skCurrentHolding2 = state.sukuks.reduce((sum, s) => {
-      if (!beforeEnd2(s.issueDate)) return sum;
-      const maturityDate = new Date(s.issueDate);
-      maturityDate.setFullYear(maturityDate.getFullYear() + s.durationYears);
-      const maturityStr = toDateStr(maturityDate);
-      const closingStr = (s as any).closingDate as string | undefined;
-      const effectiveClosingStr = closingStr || maturityStr;
-      if (effectiveClosingStr >= endStr) return sum + s.principalAmount;
-      const withdrawBalance = (s as any).withdrawBalance as number | undefined;
-      if (withdrawBalance !== undefined && withdrawBalance >= s.principalAmount) return sum;
-      return sum + s.principalAmount - (withdrawBalance || 0);
-    }, 0);
-
-    const pieData = [
-      { name: 'DSE', value: dseCurrentHolding2 },
-      { name: 'Mutual Funds', value: mfCurrentHolding2 },
-      { name: 'Fixed Deposits', value: fdrCurrentHolding2 },
-      { name: 'Online', value: olCurrentHolding2 },
-      { name: 'Sukuk', value: skCurrentHolding2 },
-    ].filter(item => item.value > 0);
 
     // ── Net Worth Trend (24 monthly snapshots) ────────────────────────────────
     // FIX: Compute raw series then normalize for chart display
@@ -1066,7 +1156,7 @@ resolveOnStartup(
         const computedBal = f.principal + addedProfit - charges;
         const bal = wasClosedBySnap && f.withdrawBalance != null ? computedBal - f.withdrawBalance : computedBal;
         if (bal <= 0) return sum;
-        const rate = f.currency === 'USD' ? (f.exchangeRate || 110) : 1;
+        const rate = f.currency === 'USD' ? globalUsdRate : (f.currency === 'LYD' ? globalLydRate : 1);
         return sum + (bal * rate);
       }, 0);
 
@@ -1135,7 +1225,7 @@ resolveOnStartup(
       // ── FDR: cumulative profit-type transactions up to snapStr ──
       const fdrProfit = state.fdrs.reduce((sum, f) => {
         if (f.investmentDate > snapStr) return sum;
-        const rate = f.currency === 'USD' ? (f.exchangeRate || 110) : 1;
+        const rate = f.currency === 'USD' ? globalUsdRate : (f.currency === 'LYD' ? globalLydRate : 1);
         return sum + f.transactions
           .filter(t => t.type === 'Profit' && t.date <= snapStr)
           .reduce((s, t) => s + t.amount * rate, 0);
@@ -1152,7 +1242,7 @@ resolveOnStartup(
       // ── Online: cumulative paid installment profit up to snapStr ──
       const olProfit = state.onlineInvestments.reduce((sum, inv) => {
         if (inv.investmentDate > snapStr) return sum;
-        const rate = inv.currency === 'USD' ? 110 : 1;
+        const rate = inv.currency === 'USD' ? globalUsdRate : (inv.currency === 'LYD' ? globalLydRate : 1);
         const paidAmt = (inv.installments || []).reduce((ss, inst) => {
           const payDate = inst.actualDate || inst.date;
           if (inst.isPaid && payDate <= snapStr) return ss + (inst.actualAmount || inst.amount);
@@ -1213,6 +1303,177 @@ resolveOnStartup(
         };
       });
     });
+
+    // ── Accounts Trend (24 monthly snapshots) ──────────────────────────────────
+    const accounts = state.incomeExpenseAccounts || [];
+    const transactions = state.incomeExpenseTransactions || [];
+    const initialBalanceTransactions = accounts
+      .filter(acc => !acc.isParent && acc.initialBalance && acc.initialBalance > 0)
+      .map(acc => ({
+        id: `init-bal-${acc.id}`,
+        date: acc.initialDate || '2026-05-01',
+        amount: acc.initialBalance,
+        type: 'Income' as const,
+        accountId: acc.id,
+        category: 'Initial Balance',
+        subCategory: 'Starting Balance',
+        description: `Initial Balance - ${acc.name}`
+      }));
+    const allAccountTxs = [...transactions, ...initialBalanceTransactions];
+
+    const conversionRates = state.conversionRates || { USD_to_BDT: 120, LYD_to_BDT: 20 };
+    const USD_rate = conversionRates.USD_to_BDT || 120;
+    const LYD_rate = conversionRates.LYD_to_BDT || 20;
+
+    const accountsTrendData: { name: string; 'Total (BDT)': number; 'Savings Income (BDT)': number; 'Savings Expense (BDT)': number; 'City Islamic': number; 'IBBL Savings': number; 'City FCY': number }[] = [];
+
+    const cityAcc = accounts.find(a => a.id === 'bdt-city-islamic' || a.name.toLowerCase().includes('city islamic'));
+    const ibblAcc = accounts.find(a => a.id === 'bdt-ibbl-savings' || a.name.toLowerCase().includes('ibbl savings'));
+    const cityFcyAcc = accounts.find(a => a.id === 'usd-city-fcy' || a.id.includes('city-fcy') || a.name.toLowerCase().includes('city fcy'));
+
+    for (let i = 0; i < 24; i++) {
+      const snap = new Date();
+      snap.setDate(1);
+      snap.setMonth(snap.getMonth() - (23 - i) + 1);
+      snap.setDate(0);
+      const snapStr = toDateStr(snap);
+      const label = snap.toLocaleString('default', { month: 'short', year: '2-digit' });
+
+      const balances: Record<string, number> = {};
+      accounts.forEach(acc => {
+        const txs = allAccountTxs.filter(t => t.date <= snapStr && (t.accountId === acc.id || t.toAccountId === acc.id));
+        const income = txs.filter(t => t.type === 'Income' && t.accountId === acc.id).reduce((s, t) => s + t.amount, 0);
+        const expense = txs.filter(t => t.type === 'Expense' && t.accountId === acc.id).reduce((s, t) => s + t.amount, 0);
+        let transOut = 0;
+        let transIn = 0;
+        txs.forEach(t => {
+          if (t.type === 'Transfer') {
+            if (t.transferType) {
+              if (t.accountId === acc.id) {
+                if (t.transferType === 'from') transOut += t.amount;
+                else if (t.transferType === 'to') transIn += t.amount;
+              }
+            } else {
+              if (t.accountId === acc.id) transOut += t.amount;
+              if (t.toAccountId === acc.id) transIn += (t.toAmount !== undefined ? t.toAmount : t.amount);
+            }
+          }
+        });
+        const loanInflow = txs.filter(t => (t.type === 'Loan' || t.category === 'Loan') && t.accountId === acc.id && (t.subCategory === 'Borrowed' || t.subCategory === 'Received Lent Money')).reduce((s, t) => s + t.amount, 0);
+        const loanOutflow = txs.filter(t => (t.type === 'Loan' || t.category === 'Loan') && t.accountId === acc.id && (t.subCategory === 'Lent' || t.subCategory === 'Repaid Borrowed Money')).reduce((s, t) => s + t.amount, 0);
+        balances[acc.id] = income - expense - transOut + transIn + loanInflow - loanOutflow;
+      });
+
+      accounts.forEach(acc => {
+        if (acc.isParent) {
+          const children = accounts.filter(a => a.parentId === acc.id);
+          const childrenSum = children.reduce((s, c) => s + (balances[c.id] || 0), 0);
+          balances[acc.id] = (balances[acc.id] || 0) + childrenSum;
+        }
+      });
+
+      const totalBDT = accounts
+        .filter(a => a.currency === 'BDT' && !a.parentId)
+        .reduce((sum, a) => sum + (balances[a.id] || 0), 0);
+      const totalLYD = accounts
+        .filter(a => a.currency === 'LYD' && !a.parentId)
+        .reduce((sum, a) => sum + (balances[a.id] || 0), 0);
+      const totalUSD = accounts
+        .filter(a => a.currency === 'USD' && !a.parentId)
+        .reduce((sum, a) => sum + (balances[a.id] || 0), 0);
+
+      const loanStatsByCurr = {
+        BDT: { borrowed: 0, repaid: 0, lent: 0, received: 0 },
+        LYD: { borrowed: 0, repaid: 0, lent: 0, received: 0 },
+        USD: { borrowed: 0, repaid: 0, lent: 0, received: 0 },
+      };
+
+      allAccountTxs.forEach(t => {
+        if (t.date > snapStr) return;
+        if (t.type !== 'Loan' && t.category !== 'Loan') return;
+        const acc = accounts.find(a => a.id === t.accountId);
+        if (!acc) return;
+        const currency = acc.currency as 'BDT' | 'LYD' | 'USD';
+        if (!loanStatsByCurr[currency]) return;
+        if (t.subCategory === 'Borrowed') loanStatsByCurr[currency].borrowed += t.amount;
+        else if (t.subCategory === 'Repaid Borrowed Money') loanStatsByCurr[currency].repaid += t.amount;
+        else if (t.subCategory === 'Lent') loanStatsByCurr[currency].lent += t.amount;
+        else if (t.subCategory === 'Received Lent Money') loanStatsByCurr[currency].received += t.amount;
+      });
+
+      const totalCurrentBorrowedBDT = Math.max(0, loanStatsByCurr.BDT.borrowed - loanStatsByCurr.BDT.repaid)
+        + Math.max(0, loanStatsByCurr.LYD.borrowed - loanStatsByCurr.LYD.repaid) * LYD_rate
+        + Math.max(0, loanStatsByCurr.USD.borrowed - loanStatsByCurr.USD.repaid) * USD_rate;
+
+      const totalCurrentLentBDT = Math.max(0, loanStatsByCurr.BDT.lent - loanStatsByCurr.BDT.received)
+        + Math.max(0, loanStatsByCurr.LYD.lent - loanStatsByCurr.LYD.received) * LYD_rate
+        + Math.max(0, loanStatsByCurr.USD.lent - loanStatsByCurr.USD.received) * USD_rate;
+
+      const rawSum = totalBDT + (totalLYD * LYD_rate) + (totalUSD * USD_rate);
+      const totalConvertedBDT = rawSum - totalCurrentBorrowedBDT + totalCurrentLentBDT;
+
+      const citySnap = cityAcc ? (balances[cityAcc.id] || 0) : 0;
+      const ibblSnap = ibblAcc ? (balances[ibblAcc.id] || 0) : 0;
+      const cityFcySnap = cityFcyAcc ? (balances[cityFcyAcc.id] || 0) : 0;
+
+      const monthStart = `${snap.getFullYear()}-${String(snap.getMonth() + 1).padStart(2, '0')}-01`;
+      const monthEnd = snapStr;
+
+      let monthIncomeBDT = 0;
+      let monthExpenseBDT = 0;
+
+      transactions.forEach(t => {
+        if (t.date >= monthStart && t.date <= monthEnd) {
+          if (t.category === 'Initial Balance' || t.id.startsWith('init-bal-')) return;
+          if (t.type === 'Loan' || t.category === 'Loan') return;
+          const acc = accounts.find(a => a.id === t.accountId);
+          const mult = acc?.currency === 'USD' ? USD_rate : acc?.currency === 'LYD' ? LYD_rate : 1;
+          const bdt = (t.amount || 0) * mult;
+          if (t.type === 'Income') {
+            monthIncomeBDT += bdt;
+          } else if (t.type === 'Expense') {
+            monthExpenseBDT += bdt;
+          }
+        }
+      });
+
+      accountsTrendData.push({
+        name: label,
+        'Total (BDT)': totalConvertedBDT,
+        'Savings Income (BDT)': monthIncomeBDT,
+        'Savings Expense (BDT)': monthExpenseBDT,
+        'City Islamic': citySnap,
+        'IBBL Savings': ibblSnap,
+        'City FCY': cityFcySnap,
+      });
+    }
+
+    const accountsTrends: Record<string, { name: string; value: number; rawValue: number; investment?: number; expense?: number; income?: number }[]> = {
+      'Total (BDT)': accountsTrendData.map((d, i) => ({
+        name: d.name,
+        value: d['Total (BDT)'],
+        rawValue: d['Total (BDT)'],
+        investment: (rawTrendData[i]?.['Total'] as number) || 0,
+      })),
+      'Cash Flow (BDT)': accountsTrendData.map(d => ({
+        name: d.name,
+        value: (d as any)['Savings Income (BDT)'],
+        rawValue: (d as any)['Savings Income (BDT)'],
+        income: (d as any)['Savings Income (BDT)'],
+        expense: (d as any)['Savings Expense (BDT)'],
+      })),
+      'Savings (BDT)': accountsTrendData.map(d => ({
+        name: d.name,
+        value: (d as any)['Savings Income (BDT)'],
+        rawValue: (d as any)['Savings Income (BDT)'],
+        income: (d as any)['Savings Income (BDT)'],
+        expense: (d as any)['Savings Expense (BDT)'],
+      })),
+      'City Islamic': accountsTrendData.map(d => ({ name: d.name, value: d['City Islamic'], rawValue: d['City Islamic'] })),
+      'IBBL Savings': accountsTrendData.map(d => ({ name: d.name, value: d['IBBL Savings'], rawValue: d['IBBL Savings'] })),
+      'City FCY': accountsTrendData.map(d => ({ name: d.name, value: d['City FCY'], rawValue: d['City FCY'] })),
+    };
+
     // ── Cash Flow Bar Chart ──
     const barData = (() => {
       const points: { name: string; income: number; expense: number }[] = [];
@@ -1228,17 +1489,26 @@ resolveOnStartup(
         const label = snap.toLocaleString('default', { month: 'short', year: '2-digit' });
 
         let income = 0;
-        income += state.fdrs.reduce((sum, f) => sum + f.transactions.filter(t => t.type === 'Profit' && t.handling !== 'Added' && t.date >= monthStart && t.date <= monthEnd).reduce((s, t) => s + t.amount, 0), 0);
+        income += state.fdrs.reduce((sum, f) => {
+          const rate = f.currency === 'USD' ? globalUsdRate : (f.currency === 'LYD' ? globalLydRate : 1);
+          return sum + f.transactions.filter(t => t.type === 'Profit' && t.handling !== 'Added' && t.date >= monthStart && t.date <= monthEnd).reduce((s, t) => s + (t.amount * rate), 0);
+        }, 0);
         income += state.sukuks.reduce((sum, s) => sum + (s.installments || []).filter(inst => inst.isPaid && (inst.actualDate || inst.date) >= monthStart && (inst.actualDate || inst.date) <= monthEnd).reduce((s2, inst) => s2 + (inst.actualAmount || inst.amount), 0), 0);
-        income += state.onlineInvestments.reduce((sum, inv) => sum + (inv.installments || []).filter(inst => inst.isPaid && (inst.actualDate || inst.date) >= monthStart && (inst.actualDate || inst.date) <= monthEnd).reduce((s2, inst) => s2 + (inst.actualAmount || inst.amount), 0), 0);
+        income += state.onlineInvestments.reduce((sum, inv) => {
+          const rate = inv.currency === 'USD' ? globalUsdRate : (inv.currency === 'LYD' ? globalLydRate : 1);
+          return sum + (inv.installments || []).filter(inst => inst.isPaid && (inst.actualDate || inst.date) >= monthStart && (inst.actualDate || inst.date) <= monthEnd).reduce((s2, inst) => s2 + ((inst.actualAmount || inst.amount) * rate), 0);
+        }, 0);
         income += dseTransactions.filter((t: any) => (t.type === 'Dividend') && t.date >= monthStart && t.date <= monthEnd).reduce((s: number, t: any) => s + Math.abs(t.total), 0);
 
         let expense = 0;
         expense += state.mutualFunds.reduce((sum, f) => sum + f.transactions.filter(t => t.type === 'Buy' && !t.isDividend && t.date >= monthStart && t.date <= monthEnd).reduce((s, t) => s + (t.sipAmount || t.amount || 0), 0), 0);
-        expense += state.onlineInvestments.filter(inv => inv.investmentDate >= monthStart && inv.investmentDate <= monthEnd).reduce((sum, inv) => sum + inv.amount, 0);
+        expense += state.onlineInvestments.filter(inv => inv.investmentDate >= monthStart && inv.investmentDate <= monthEnd).reduce((sum, inv) => {
+          const rate = inv.currency === 'USD' ? globalUsdRate : (inv.currency === 'LYD' ? globalLydRate : 1);
+          return sum + (inv.amount * rate);
+        }, 0);
         expense += state.sukuks.filter(s => s.investmentDate >= monthStart && s.investmentDate <= monthEnd).reduce((sum, s) => sum + s.principalAmount, 0);
         expense += state.fdrs.filter(f => f.investmentDate >= monthStart && f.investmentDate <= monthEnd).reduce((sum, f) => {
-          const rate = f.currency === 'USD' ? (f.exchangeRate || 110) : 1;
+          const rate = f.currency === 'USD' ? globalUsdRate : (f.currency === 'LYD' ? globalLydRate : 1);
           return sum + (f.principal * rate);
         }, 0);
         expense += dseTransactions.filter((t: any) => t.type === 'Buy' && t.date >= monthStart && t.date <= monthEnd).reduce((s: number, t: any) => s + Math.abs(t.total), 0);
@@ -1249,18 +1519,26 @@ resolveOnStartup(
     })();
 
     return {
-      totalNetWorth: current.totalNetWorth,
+      totalNetWorth: current.totalBalanceInBDT,
+      totalBalanceInBDT: current.totalBalanceInBDT,
+      totalInvestmentHolding: current.totalInvestmentHolding,
       totalActiveInvestment: current.totalActiveInvestment,
       totalInvested: current.totalInvested,
       totalProfit: current.totalProfit,
-      netWorthYoy,
+      netWorthYoy: totalBalanceInBdtYoy,
+      totalBalanceInBdtYoy,
+      investmentHoldingYoy,
       activeInvYoy,
       totalInvYoy,
       totalProfitYoy,
       pieData,
+      assetAllocationData: current.assetAllocationData,
       netWorthTrend: netWorthTrends,
+      accountsTrend: accountsTrends,
       barData,
       seriesMetadata,
+      totalCurrentBorrowedBDT: totalLoanStats.totalCurrentBorrowedBDT,
+      totalCurrentLentBDT: totalLoanStats.totalCurrentLentBDT,
     };
   }, [state, dseTransactions, startStr, endStr, lyStartStr, lyEndStr]);
 
@@ -1295,204 +1573,263 @@ resolveOnStartup(
             </div>
           )}
           {/* Dashboard Range Selector */}
-<div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/50 border border-slate-800 rounded-xl p-2 relative">
-  
-  <div className="flex flex-col sm:flex-row sm:items-center gap-3 w-full sm:w-auto">
-    
-    {/* LINE 1 (Mobile): Range + Settings */}
-    <div className="flex items-center justify-between w-full sm:w-auto gap-2">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/50 border border-slate-800 rounded-xl p-2 relative">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-3 w-full sm:w-auto">
+              {/* LINE 1 (Mobile): Range + Settings */}
+              <div className="flex items-center justify-between w-full sm:w-auto gap-2">
+                {/* Range Selection */}
+                <div className="relative flex-1 sm:flex-none">
+                  {/* Mobile Dropdown */}
+                  <div className="block sm:hidden">
+                    <button
+                      onClick={() => setIsRangeMenuOpen(!isRangeMenuOpen)}
+                      className="flex items-center justify-between gap-4 bg-slate-950 border border-slate-800 rounded-lg px-4 h-9 text-[10px] font-bold text-slate-300 hover:text-white transition-all uppercase w-full"
+                    >
+                      <div className="flex items-center gap-2">
+                        <Calendar size={14} className="text-teal-400" />
+                        {historyRange === 'this'
+                          ? 'This month'
+                          : historyRange === 'fiscal'
+                            ? 'Fiscal'
+                            : 'Custom'}
+                      </div>
+                      <ChevronDown
+                        size={14}
+                        className={cn(
+                          "text-slate-500 transition-transform",
+                          isRangeMenuOpen ? "rotate-180 text-teal-400" : ""
+                        )}
+                      />
+                    </button>
 
-      {/* Range Selection */}
-      <div className="relative flex-1 sm:flex-none">
+                    {isRangeMenuOpen && (
+                      <>
+                        <div
+                          className="fixed inset-0 z-40"
+                          onClick={() => setIsRangeMenuOpen(false)}
+                        />
+                        <div className="absolute left-0 mt-2 w-full bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95 backdrop-blur-md">
+                          {(['this', 'fiscal', 'custom'] as const).map(id => (
+                            <button
+                              key={id}
+                              onClick={() => {
+                                handleRangeChange(id);
+                                setIsRangeMenuOpen(false);
+                              }}
+                              className={cn(
+                                "w-full text-left px-3 py-2 text-[10px] font-bold rounded-lg transition-colors uppercase",
+                                historyRange === id
+                                  ? "bg-teal-400 text-slate-950"
+                                  : "text-slate-300 hover:bg-slate-800"
+                              )}
+                            >
+                              {id === 'this'
+                                ? 'This month'
+                                : id === 'fiscal'
+                                  ? 'Fiscal'
+                                  : 'Custom'}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
 
-        {/* Mobile Dropdown */}
-        <div className="block sm:hidden">
-          <button
-            onClick={() => setIsRangeMenuOpen(!isRangeMenuOpen)}
-            className="flex items-center justify-between gap-4 bg-slate-950 border border-slate-800 rounded-lg px-4 h-9 text-[10px] font-bold text-slate-300 hover:text-white transition-all uppercase w-full"
-          >
-            <div className="flex items-center gap-2">
-              <Calendar size={14} className="text-teal-400" />
-              {historyRange === 'all' ? 'Overall' : historyRange === 'last12m' ? 'Last 12M' : historyRange === 'fiscal' ? 'Fiscal' : 'Custom'}
+                  {/* Desktop Tabs */}
+                  <div className="hidden sm:flex items-center bg-slate-950/50 rounded-lg p-1 border border-slate-800/50 gap-1 font-sans">
+                    {(['this', 'fiscal', 'custom'] as const).map(id => (
+                      <button
+                        key={id}
+                        onClick={() => handleRangeChange(id)}
+                        className={cn(
+                          "px-4 py-1.5 rounded-md text-[10px] font-bold uppercase transition-all border",
+                          historyRange === id
+                            ? "bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/20"
+                            : "bg-slate-900/40 border-slate-800/40 text-slate-300 hover:text-white"
+                        )}
+                      >
+                        {id === 'this'
+                          ? 'This month'
+                          : id === 'fiscal'
+                            ? 'Fiscal'
+                            : 'Custom'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Settings Button - Mobile */}
+                <div className="block sm:hidden">
+                  <div className="relative">
+                    <button
+                      onClick={() => setIsSettingsMenuOpen(!isSettingsMenuOpen)}
+                      className="flex items-center justify-center gap-2 px-3 sm:px-4 py-2 rounded-md text-[10px] font-bold uppercase transition-all whitespace-nowrap bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/10 hover:bg-teal-300 hover:shadow-teal-400/20"
+                    >
+                      <Settings size={14} />
+                      <ChevronDown size={14} className={cn("opacity-50 transition-transform", isSettingsMenuOpen ? "rotate-180" : "")} />
+                    </button>
+
+                    {isSettingsMenuOpen && (
+                      <>
+                        <div className="fixed inset-0 z-40" onClick={() => setIsSettingsMenuOpen(false)} />
+                        <div className="absolute right-0 mt-2 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-2 animate-in fade-in zoom-in-95 backdrop-blur-xl transition-all">
+                          <button
+                            onClick={() => { handleDashboardBackup(); setIsSettingsMenuOpen(false); }}
+                            className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
+                          >
+                            <Download size={14} className="text-teal-400" />
+                            BACKUP
+                          </button>
+                          <label className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase cursor-pointer">
+                            <Upload size={14} className="text-teal-400" />
+                            RESTORE
+                            <input
+                              type="file"
+                              className="hidden"
+                              accept=".json"
+                              onChange={(e) => {
+                                setIsSettingsMenuOpen(false);
+                                handleDashboardRestoreFile(e);
+                              }}
+                            />
+                          </label>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Date Browsing Controls */}
+              <div className="flex items-center gap-1.5 px-1 animate-in fade-in duration-300">
+                <button
+                  onClick={() => {
+                    if (historyRange === 'this') {
+                      navigateHistoryThisMonth(-1);
+                    } else if (historyRange === 'fiscal') {
+                      setHistoryFiscalStartYear(prev => prev - 1);
+                    } else {
+                      navigateHistoryCustomMonth(-1);
+                    }
+                  }}
+                  className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                >
+                  <ChevronLeft size={14} />
+                </button>
+
+                {historyRange === 'custom' ? (
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="date"
+                      value={historyCustomDates.start}
+                      onChange={e => setHistoryCustomDates(prev => ({
+                        ...prev,
+                        start: e.target.value
+                      }))}
+                      className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none uppercase cursor-pointer"
+                    />
+                    <span className="text-slate-700 font-bold text-[10px]">–</span>
+                    <input
+                      type="date"
+                      value={historyCustomDates.end}
+                      onChange={e => setHistoryCustomDates(prev => ({
+                        ...prev,
+                        end: e.target.value
+                      }))}
+                      className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none uppercase cursor-pointer"
+                    />
+                  </div>
+                ) : historyRange === 'fiscal' ? (
+                  <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-[10px] font-bold text-white uppercase select-none tracking-wider whitespace-nowrap min-w-[160px] text-center">
+                    July {historyFiscalStartYear} - June {historyFiscalStartYear + 1}
+                  </div>
+                ) : (
+                  <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-[10px] font-bold text-teal-400 uppercase select-none tracking-wider whitespace-nowrap min-w-[120px] text-center">
+                    {formatHistoryThisMonthLabel(historyThisMonthDate)}
+                  </div>
+                )}
+
+                <button
+                  onClick={() => {
+                    if (historyRange === 'this') {
+                      navigateHistoryThisMonth(1);
+                    } else if (historyRange === 'fiscal') {
+                      setHistoryFiscalStartYear(prev => prev + 1);
+                    } else {
+                      navigateHistoryCustomMonth(1);
+                    }
+                  }}
+                  className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                >
+                  <ChevronRight size={14} />
+                </button>
+              </div>
             </div>
 
-            <ChevronDown
-              size={14}
-              className={cn(
-                "text-slate-500 transition-transform",
-                isRangeMenuOpen ? "rotate-180 text-teal-400" : ""
+            {/* Settings Button - Desktop */}
+            <div className="hidden sm:block relative">
+              <button
+                onClick={() => setIsSettingsMenuOpen(!isSettingsMenuOpen)}
+                className="flex items-center justify-center gap-2 px-3 sm:px-4 py-2 rounded-md text-[10px] font-bold uppercase transition-all whitespace-nowrap bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/10 hover:bg-teal-300 hover:shadow-teal-400/20"
+              >
+                <Settings size={14} />
+                <span className="hidden sm:inline">Settings</span>
+                <ChevronDown size={14} className={cn("opacity-50 transition-transform", isSettingsMenuOpen ? "rotate-180" : "")} />
+              </button>
+
+              {isSettingsMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setIsSettingsMenuOpen(false)} />
+                  <div className="absolute right-0 mt-2 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-2 backdrop-blur-xl">
+                    <button
+                      onClick={() => { handleDashboardBackup(); setIsSettingsMenuOpen(false); }}
+                      className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
+                    >
+                      <Download size={14} className="text-teal-400" />
+                      BACKUP
+                    </button>
+                    <label className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase cursor-pointer">
+                      <Upload size={14} className="text-teal-400" />
+                      RESTORE
+                      <input
+                        type="file"
+                        className="hidden"
+                        accept=".json"
+                        onChange={(e) => {
+                          setIsSettingsMenuOpen(false);
+                          handleDashboardRestoreFile(e);
+                        }}
+                      />
+                    </label>
+                  </div>
+                </>
               )}
-            />
-          </button>
-
-          {isRangeMenuOpen && (
-            <>
-              <div className="fixed inset-0 z-40" onClick={() => setIsRangeMenuOpen(false)} />
-              <div className="absolute left-0 mt-2 w-full bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95 backdrop-blur-md">
-                {['all','last12m','fiscal','custom'].map((id) => (
-                  <button
-                    key={id}
-                    onClick={() => handleRangeChange(id as any)}
-                    className={cn(
-                      "w-full text-left px-3 py-2 text-[10px] font-bold rounded-lg transition-colors uppercase",
-                      historyRange === id
-                        ? "bg-teal-400 text-slate-950"
-                        : "text-slate-300 hover:bg-slate-800"
-                    )}
-                  >
-                    {id === 'all' ? 'Overall' : id === 'last12m' ? 'Last 12M' : id === 'fiscal' ? 'Fiscal' : 'Custom'}
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-
-        {/* Desktop Tabs */}
-        <div className="hidden sm:flex items-center bg-slate-950/50 rounded-lg p-1 border border-slate-800/50 gap-1">
-          {['all','last12m','fiscal','custom'].map(id => (
-            <button
-              key={id}
-              onClick={() => handleRangeChange(id as any)}
-              className={cn(
-                "px-4 py-1.5 rounded-md text-[10px] font-bold uppercase transition-all border",
-                historyRange === id
-                  ? "bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/20"
-                  : "bg-slate-900/40 border-slate-800/40 text-slate-300 hover:text-white"
-              )}
-            >
-              {id === 'all' ? 'Overall' : id === 'last12m' ? 'Last 12M' : id === 'fiscal' ? 'Fiscal' : 'Custom'}
-            </button>
-          ))}
-        </div>
-      </div>
-
-{/* Settings Button - Mobile */}
-      <div className="block sm:hidden">
-        <div className="relative">
-          <button
-            onClick={() => setIsSettingsMenuOpen(!isSettingsMenuOpen)}
-            className="flex items-center justify-center gap-2 px-3 sm:px-4 py-2 rounded-md text-[10px] font-bold uppercase transition-all whitespace-nowrap bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/10 hover:bg-teal-300 hover:shadow-teal-400/20"
-          >
-            <Settings size={14} />
-            <ChevronDown size={14} className={cn("opacity-50 transition-transform", isSettingsMenuOpen ? "rotate-180" : "")} />
-          </button>
-
-          {isSettingsMenuOpen && (
-            <>
-              <div className="fixed inset-0 z-40" onClick={() => setIsSettingsMenuOpen(false)} />
-              <div className="absolute right-0 mt-2 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-2 animate-in fade-in zoom-in-95 backdrop-blur-xl transition-all">
-                <button
-                  onClick={() => { handleDashboardBackup(); setIsSettingsMenuOpen(false); }}
-                  className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
-                >
-                  <Download size={14} className="text-teal-400" />
-                  BACKUP
-                </button>
-                <label className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase cursor-pointer">
-                  <Upload size={14} className="text-teal-400" />
-                  RESTORE
-                  <input
-                    type="file"
-                    className="hidden"
-                    accept=".json"
-                    onChange={(e) => {
-                      setIsSettingsMenuOpen(false);
-                      handleDashboardRestoreFile(e);
-                    }}
-                  />
-                </label>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
-
-    {/* LINE 2 (Mobile): Custom Dates */}
-    {historyRange === 'custom' && (
-      <div className="flex items-center justify-center sm:justify-start gap-1.5 px-1 animate-in fade-in slide-in-from-top-2 sm:slide-in-from-left-2 duration-300 w-full sm:w-auto">
-        
-        <button onClick={() => navigateCustomMonth(-1)} className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400">
-          <ChevronLeft size={14} />
-        </button>
-
-        <input
-          type="date"
-          value={historyCustomDates.start}
-          onChange={(e) => setHistoryCustomDates(prev => ({ ...prev, start: e.target.value }))}
-          className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none focus:border-teal-400/50 uppercase flex-1 sm:flex-none"
-        />
-
-        <span className="text-slate-700 text-[10px] font-bold">–</span>
-
-        <input
-          type="date"
-          value={historyCustomDates.end}
-          onChange={(e) => setHistoryCustomDates(prev => ({ ...prev, end: e.target.value }))}
-          className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none focus:border-teal-400/50 uppercase flex-1 sm:flex-none"
-        />
-
-        <button onClick={() => navigateCustomMonth(1)} className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400">
-          <ChevronRight size={14} />
-        </button>
-      </div>
-    )}
-  </div>
-
-  {/* Settings Button - Desktop */}
-  <div className="hidden sm:block relative">
-    <button
-      onClick={() => setIsSettingsMenuOpen(!isSettingsMenuOpen)}
-      className="flex items-center justify-center gap-2 px-3 sm:px-4 py-2 rounded-md text-[10px] font-bold uppercase transition-all whitespace-nowrap bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/10 hover:bg-teal-300 hover:shadow-teal-400/20"
-    >
-      <Settings size={14} />
-      <span className="hidden sm:inline">Settings</span>
-      <ChevronDown size={14} className={cn("opacity-50 transition-transform", isSettingsMenuOpen ? "rotate-180" : "")} />
-    </button>
-
-    {isSettingsMenuOpen && (
-      <>
-        <div className="fixed inset-0 z-40" onClick={() => setIsSettingsMenuOpen(false)} />
-        <div className="absolute right-0 mt-2 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-2 backdrop-blur-xl">
-
-          <button
-            onClick={() => { handleDashboardBackup(); setIsSettingsMenuOpen(false); }}
-            className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
-          >
-            <Download size={14} className="text-teal-400" />
-            BACKUP
-          </button>
-<label className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase cursor-pointer">
-            <Upload size={14} className="text-teal-400" />
-            RESTORE
-            <input
-              type="file"
-              className="hidden"
-              accept=".json"
-              onChange={(e) => {
-                setIsSettingsMenuOpen(false);
-                handleDashboardRestoreFile(e);
-              }}
-            />
-          </label>
-
-        </div>
-      </>
-    )}
-  </div>
-</div>
+            </div>
+          </div>
 
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 lg:gap-4">
               <SummaryCard
                 className="col-span-1"
                 title="Total Net Worth"
-                subtitle="Total Current Asset"
-                value={stats.totalNetWorth}
-                trend={formatYoy(stats.netWorthYoy)}
+                subtitle="Total Balance in BDT"
+                value={stats.totalBalanceInBDT}
+                trend={formatYoy(stats.totalBalanceInBdtYoy)}
                 trendLabel="vs Last Year"
                 icon={DollarSign}
                 color="teal"
+                hideFooter
+                borrowedValue={stats.totalCurrentBorrowedBDT}
+                lentValue={stats.totalCurrentLentBDT}
+              />
+              <SummaryCard
+                className="col-span-1"
+                title="Total Investment Holding"
+                subtitle="Balance in Investment A/C"
+                value={stats.totalInvestmentHolding}
+                trend={formatYoy(stats.investmentHoldingYoy)}
+                trendLabel="vs Last Year"
+                icon={Wallet}
+                color="blue"
                 hideFooter
               />
               <SummaryCard
@@ -1501,17 +1838,6 @@ resolveOnStartup(
                 subtitle="Total Active Investment"
                 value={stats.totalActiveInvestment}
                 trend={formatYoy(stats.activeInvYoy)}
-                trendLabel="vs Last Year"
-                icon={Wallet}
-                color="blue"
-                hideFooter
-              />
-              <SummaryCard
-                className="col-span-1"
-                title="Total Invested"
-                subtitle="Total Investment"
-                value={stats.totalInvested}
-                trend={formatYoy(stats.totalInvYoy)}
                 trendLabel="vs Last Year"
                 icon={Briefcase}
                 color="purple"
@@ -1532,7 +1858,9 @@ resolveOnStartup(
 
             <DashboardCharts
               pieData={stats.pieData}
+              assetAllocationData={stats.assetAllocationData}
               lineDataMap={stats.netWorthTrend}
+              accountsLineDataMap={stats.accountsTrend}
               barData={stats.barData}
               seriesMetadata={stats.seriesMetadata}
             />
@@ -1552,6 +1880,96 @@ resolveOnStartup(
             setTriggerAdd={setTriggerAdd}
             onTitleChange={setDseTrackerTitle}
             activeTab={activeModule.startsWith('dse-') ? (activeModule.replace('dse-', '') as any) : 'summary'}
+            onNavigateToModule={handleNavigateToModule}
+            onDeleteLinkedTransfer={(groupId) => {
+              updateState(s => ({
+                ...s,
+                incomeExpenseTransactions: s.incomeExpenseTransactions.filter(t => t.transferGroupId !== groupId)
+              }));
+            }}
+            onUpdateLinkedTransfer={(groupId, updates) => {
+              updateState(s => ({
+                ...s,
+                incomeExpenseTransactions: s.incomeExpenseTransactions.map(t =>
+                  t.transferGroupId === groupId
+                    ? {
+                        ...t,
+                        date: updates.date,
+                        description: updates.description ?? t.description,
+                        amount: updates.amount,
+                        toAmount: updates.amount
+                      }
+                    : t
+                )
+              }));
+            }}
+            onDeleteLinkedDseTransaction={(dseIds) => {
+              const ids = Array.isArray(dseIds) ? dseIds : [dseIds];
+              updateState(s => ({
+                ...s,
+                incomeExpenseTransactions: s.incomeExpenseTransactions.filter(t => !t.dseTxId || !ids.includes(t.dseTxId))
+              }));
+            }}
+            onUpdateLinkedDseTransaction={(dseTxId, updates) => {
+              updateState(s => ({
+                ...s,
+                incomeExpenseTransactions: s.incomeExpenseTransactions.map(t =>
+                  t.dseTxId === dseTxId
+                    ? {
+                        ...t,
+                        date: updates.date,
+                        amount: updates.amount,
+                        toAmount: updates.amount,
+                        description: updates.description ?? t.description
+                      }
+                    : t
+                )
+              }));
+            }}
+            onSyncSellProfitLoss={(sellTx, pnl) => {
+              updateState(s => {
+                const existing = s.incomeExpenseTransactions.find(tx => tx.dseTxId === sellTx.id);
+                const boAcc = s.incomeExpenseAccounts?.find(a => isBoAccount(a) || a.id === 'bdt-bo-account')
+                  || s.incomeExpenseAccounts?.find(a => !a.isParent)
+                  || { id: 'bdt-bo-account' };
+
+                const isProfit = pnl >= 0;
+                const absAmount = Math.round(Math.abs(pnl) * 100) / 100;
+
+                let categoryName = 'Finance Income';
+                let subCategoryName = isProfit ? 'Capital Gain' : 'Capital Loss';
+
+                const finCat = s.incomeExpenseCategories?.find(c => c.name.toLowerCase().includes('finance') || c.name.toLowerCase().includes('investment'));
+                if (finCat) {
+                  categoryName = finCat.name;
+                }
+
+                const ticker = sellTx.ticker ? sellTx.ticker.toUpperCase() : '';
+                const defaultSellDesc = ticker ? `Stocks P&L: ${ticker}` : 'Stocks P&L';
+                const desc = sellTx.notes?.trim()
+                  ? sellTx.notes
+                  : defaultSellDesc;
+
+                const updatedTx: any = {
+                  id: existing ? existing.id : crypto.randomUUID(),
+                  date: sellTx.date,
+                  amount: absAmount,
+                  type: isProfit ? 'Income' : 'Expense',
+                  accountId: existing?.accountId || boAcc.id,
+                  category: existing?.category || categoryName,
+                  subCategory: subCategoryName,
+                  description: desc,
+                  dseTxId: sellTx.id,
+                  autoSyncDse: true
+                };
+
+                const remaining = s.incomeExpenseTransactions.filter(tx => tx.dseTxId !== sellTx.id);
+                return {
+                  ...s,
+                  incomeExpenseTransactions: [updatedTx, ...remaining]
+                };
+              });
+            }}
             onAdd={(newHolding) => {
               updateState(s => ({ ...s, dseHoldings: [...s.dseHoldings, { ...newHolding, id: crypto.randomUUID() }] }));
             }}
@@ -1574,12 +1992,57 @@ resolveOnStartup(
         return (
           <OnlineInvestments
             investments={onlineInvestments}
+            conversionRates={state.conversionRates}
             triggerAdd={triggerAdd}
             setTriggerAdd={setTriggerAdd}
             inheritedData={inheritedAddData}
-            onClearInheritedData={() => setInheritedAddData(null)}
+            onClearInheritedData={handleClearInheritedData}
             onTitleChange={setOnlineInvestmentsTitle}
             onNavigateToModule={handleNavigateToModule}
+            onDeleteLinkedTransfer={(groupId) => {
+              updateState(s => ({
+                ...s,
+                incomeExpenseTransactions: s.incomeExpenseTransactions.filter(t => t.transferGroupId !== groupId)
+              }));
+            }}
+            onUpdateLinkedTransfer={(groupId, updates) => {
+              updateState(s => ({
+                ...s,
+                incomeExpenseTransactions: s.incomeExpenseTransactions.map(t =>
+                  t.transferGroupId === groupId
+                    ? {
+                        ...t,
+                        date: updates.date,
+                        description: updates.description ?? t.description,
+                        amount: updates.amount,
+                        toAmount: updates.amount
+                      }
+                    : t
+                )
+              }));
+            }}
+            onDeleteLinkedIncomeTx={(txId) => {
+              updateState(s => ({
+                ...s,
+                incomeExpenseTransactions: s.incomeExpenseTransactions.filter(t => t.id !== txId && t.onlineTxId !== txId && t.transferGroupId !== txId)
+              }));
+            }}
+            onUpdateLinkedIncomeTx={(txId, updates) => {
+              updateState(s => ({
+                ...s,
+                incomeExpenseTransactions: s.incomeExpenseTransactions.map(t =>
+                  (t.id === txId || t.onlineTxId === txId || t.transferGroupId === txId)
+                    ? {
+                        ...t,
+                        date: updates.date,
+                        description: updates.description ?? t.description,
+                        amount: updates.amount,
+                        toAmount: updates.amount
+                      }
+                    : t
+                )
+              }));
+            }}
             onAdd={(newInv) => {
   const withId = {
     ...newInv,
@@ -1685,16 +2148,38 @@ onBatchDelete={(ids) => {
           />
         );
 
-      case 'mutual-funds':
+            case 'mutual-funds':
         return (
           <MutualFundsModule
             investments={state.mutualFunds}
             triggerAdd={triggerAdd}
             setTriggerAdd={setTriggerAdd}
             inheritedData={inheritedAddData}
-            onClearInheritedData={() => setInheritedAddData(null)}
+            onClearInheritedData={handleClearInheritedData}
             onTitleChange={setMutualFundsTitle}
             onNavigateToModule={handleNavigateToModule}
+            onDeleteLinkedTransfer={(groupId) => {
+              updateState(s => ({
+                ...s,
+                incomeExpenseTransactions: s.incomeExpenseTransactions.filter(t => t.transferGroupId !== groupId && t.id !== groupId && t.mfTxId !== groupId)
+              }));
+            }}
+            onUpdateLinkedTransfer={(groupId, updates) => {
+              updateState(s => ({
+                ...s,
+                incomeExpenseTransactions: s.incomeExpenseTransactions.map(t =>
+                  (t.transferGroupId === groupId || t.id === groupId || t.mfTxId === groupId)
+                    ? {
+                        ...t,
+                        date: updates.date,
+                        description: updates.description ?? t.description,
+                        amount: updates.amount,
+                        toAmount: updates.amount
+                      }
+                    : t
+                )
+              }));
+            }}
 
             onAdd={(newInv) => {
   const withId = {
@@ -1810,13 +2295,35 @@ onBatchDelete={(ids) => {
         return (
           <FixedDepositsModule
             investments={state.fdrs}
+            conversionRates={state.conversionRates}
             triggerAdd={triggerAdd}
             setTriggerAdd={setTriggerAdd}
             inheritedData={inheritedAddData}
-            onClearInheritedData={() => setInheritedAddData(null)}
+            onClearInheritedData={handleClearInheritedData}
             onTitleChange={setFixedDepositsTitle}
             onNavigateToModule={handleNavigateToModule}
-            
+            onCreateFdrAccount={handleCreateFdrAccount}
+            onDeleteLinkedIncome={(txId) => {
+              updateState(s => ({
+                ...s,
+                incomeExpenseTransactions: s.incomeExpenseTransactions?.filter(t => t.id !== txId && t.fdrTxId !== txId)
+              }));
+            }}
+            onUpdateLinkedIncome={(txId, updates) => {
+              updateState(s => ({
+                ...s,
+                incomeExpenseTransactions: s.incomeExpenseTransactions?.map(t =>
+                  (t.id === txId || t.fdrTxId === txId)
+                    ? {
+                        ...t,
+                        date: updates.date,
+                        amount: updates.amount,
+                        ...(updates.description ? { description: updates.description } : {})
+                      }
+                    : t
+                )
+              }));
+            }}
             onAdd={(newInv) => {
   const withId = {
     ...newInv,
@@ -1944,9 +2451,52 @@ onBatchDelete={(ids) => {
             triggerAdd={triggerAdd}
             setTriggerAdd={setTriggerAdd}
             inheritedData={inheritedAddData}
-            onClearInheritedData={() => setInheritedAddData(null)}
+            onClearInheritedData={handleClearInheritedData}
             onTitleChange={setSukukTitle}
             onNavigateToModule={handleNavigateToModule}
+            onDeleteLinkedTransfer={(groupId) => {
+              updateState(s => ({
+                ...s,
+                incomeExpenseTransactions: s.incomeExpenseTransactions.filter(t => t.transferGroupId !== groupId)
+              }));
+            }}
+            onUpdateLinkedTransfer={(groupId, updates) => {
+              updateState(s => ({
+                ...s,
+                incomeExpenseTransactions: s.incomeExpenseTransactions.map(t =>
+                  t.transferGroupId === groupId
+                    ? {
+                        ...t,
+                        date: updates.date,
+                        description: updates.description ?? t.description,
+                        amount: updates.amount,
+                        toAmount: updates.amount
+                      }
+                    : t
+                )
+              }));
+            }}
+            onDeleteLinkedIncomeTx={(txId) => {
+              updateState(s => ({
+                ...s,
+                incomeExpenseTransactions: s.incomeExpenseTransactions.filter(t => t.id !== txId && t.sukukTxId !== txId)
+              }));
+            }}
+            onUpdateLinkedIncomeTx={(txId, updates) => {
+              updateState(s => ({
+                ...s,
+                incomeExpenseTransactions: s.incomeExpenseTransactions.map(t =>
+                  (t.id === txId || t.sukukTxId === txId)
+                    ? {
+                        ...t,
+                        date: updates.date,
+                        description: updates.description ?? t.description,
+                        amount: updates.amount
+                      }
+                    : t
+                )
+              }));
+            }}
             
             onAdd={(newInv) => {
   const withId = {
@@ -2085,7 +2635,7 @@ onBatchDelete={(ids) => {
             setTriggerAdd={setTriggerAdd}
             onNavigateToModule={handleNavigateToModule}
             inheritedData={inheritedAddData}
-            onClearInheritedData={() => setInheritedAddData(null)}
+            onClearInheritedData={handleClearInheritedData}
           />
         );
 
@@ -2118,7 +2668,7 @@ onBatchDelete={(ids) => {
             activeModule.startsWith('dse') ? dseTrackerTitle :
             activeModule === 'dashboard' ? (
               <span className="flex items-center gap-2">
-                DASHBOARD {historyRange !== 'all' && <span className="text-teal-400 font-display text-sm font-bold opacity-100 tracking-wider leading-none">/ {new Date(startStr).toLocaleString('default', { month: 'short', year: 'numeric' })} - {new Date(endStr).toLocaleString('default', { month: 'short', year: 'numeric' })}</span>}
+                DASHBOARD <span className="text-teal-400 font-display text-sm font-bold opacity-100 tracking-wider leading-none">/ {rangeDates.start.toLocaleString('default', { month: 'short', year: 'numeric' })} - {rangeDates.end.toLocaleString('default', { month: 'short', year: 'numeric' })}</span>
               </span>
             ) :
             activeModule === 'mutual-funds' ? mutualFundsTitle :
@@ -2180,3 +2730,16 @@ onBatchDelete={(ids) => {
     </div>
   );
 }
+
+
+
+
+
+
+
+
+
+
+
+
+

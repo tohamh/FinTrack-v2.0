@@ -43,6 +43,7 @@ interface DseTransaction {
   commission: number;
   total: number;
   notes: string;
+  linkedIeGroupId?: string;
 }
 
 interface DseTrackerModuleProps {
@@ -53,6 +54,25 @@ interface DseTrackerModuleProps {
   onTitleChange?: (title: React.ReactNode) => void;
   triggerAdd?: boolean;
   setTriggerAdd?: (val: boolean) => void;
+  onNavigateToModule?: (
+    module: string,
+    initialAddData?: {
+      date: string;
+      amount: number;
+      type?: 'Transfer' | 'Income' | 'Expense' | 'Loan';
+      category?: string;
+      subCategory?: string;
+      targetModule?: string;
+      description?: string;
+      linkedTxId?: string;
+      accountId?: string;
+    }
+  ) => void;
+  onDeleteLinkedTransfer?: (groupId: string) => void;
+  onUpdateLinkedTransfer?: (groupId: string, updates: { date: string; amount: number; description?: string }) => void;
+  onDeleteLinkedDseTransaction?: (dseTxId: string | string[]) => void;
+  onUpdateLinkedDseTransaction?: (dseTxId: string, updates: { date: string; amount: number; description?: string }) => void;
+  onSyncSellProfitLoss?: (sellTx: DseTransaction, pnl: number) => void;
 }
 
 // ── Tab Types ──────────────────────────────────────────────────────────────
@@ -133,6 +153,49 @@ const blankForm = (date: string): Partial<DseTransaction> => ({
   total: 0,
   notes: '',
 });
+
+export function computeSellRealizedPnL(sellTx: DseTransaction, allTransactions: DseTransaction[]): number {
+  if (sellTx.type !== 'Sell') return 0;
+  const typePriority: Record<string, number> = { Deposit: 1, Buy: 2, Dividend: 3, Charge: 4, Sell: 5, Withdrawal: 6 };
+  const sorted = [...allTransactions].sort((a, b) => {
+    const dd = new Date(a.date).getTime() - new Date(b.date).getTime();
+    return dd !== 0 ? dd : (typePriority[a.type] || 99) - (typePriority[b.type] || 99);
+  });
+
+  const hMap: Record<string, { qty: number; totalCost: number }> = {};
+  let targetPnL = 0;
+
+  for (const t of sorted) {
+    const key = t.ticker ? `${t.portfolio || 'Investment'}|${t.ticker}` : null;
+    if (!key) continue;
+
+    if (t.type === 'Buy') {
+      if (!hMap[key]) hMap[key] = { qty: 0, totalCost: 0 };
+      hMap[key].qty += t.qty;
+      hMap[key].totalCost += t.total;
+    } else if (t.type === 'Sell') {
+      if (!hMap[key]) hMap[key] = { qty: 0, totalCost: 0 };
+      const h = hMap[key];
+      let pnl = 0;
+      let costSold = 0;
+      if (h.qty > 0) {
+        const avg = h.totalCost / h.qty;
+        costSold = Math.min(t.qty, h.qty) * avg;
+        pnl = t.total - costSold;
+        h.qty = Math.max(0, h.qty - t.qty);
+        h.totalCost = Math.max(0, h.totalCost - costSold);
+      } else {
+        pnl = t.total - (t.qty * t.price);
+      }
+      if (t.id === sellTx.id) {
+        targetPnL = pnl;
+        break;
+      }
+    }
+  }
+
+  return targetPnL;
+}
 
 // ── InfoTooltip ────────────────────────────────────────────────────────────
 
@@ -234,7 +297,7 @@ interface TransactionModalProps {
   isOpen: boolean;
   editingTransaction: DseTransaction | null;
   onClose: () => void;
-  onSave: (t: DseTransaction, keepOpen?: boolean) => Promise<void>;
+  onSave: (t: DseTransaction, keepOpen?: boolean, syncToIncomeExpense?: boolean) => Promise<void>;
 }
 
 interface DseSettings {
@@ -262,6 +325,7 @@ const TransactionModal: React.FC<TransactionModalProps & {
   const [commMode, setCommMode] = useState<'Auto' | 'Manual'>('Auto');
   const [suggestions, setSuggestions] = useState<any[]>([]);
   const [error, setError] = useState<string>('');
+  const [syncToIncomeExpense, setSyncToIncomeExpense] = useState<boolean>(true);
 
   useEffect(() => {
     if (isOpen) {
@@ -280,6 +344,7 @@ const TransactionModal: React.FC<TransactionModalProps & {
       setCommMode('Auto');
       setSuggestions([]);
       setError('');
+      setSyncToIncomeExpense(true);
     }
   }, [isOpen, editingTransaction]);
 
@@ -347,15 +412,19 @@ const STOCK_LIST = useMemo(() => {
       let commission = prev.commission || 0;
 
       if (commMode === 'Auto') {
-        commission =
-          (prev.type === 'Buy' || prev.type === 'Sell')
-            ? subtotal * (commissionRate / 100)
-            : 0;
+        if (prev.type === 'Buy' || prev.type === 'Sell') {
+          commission = Number((subtotal * (commissionRate / 100)).toFixed(2));
+        } else if (prev.type === 'Dividend') {
+          commission = Number((subtotal * 0.15).toFixed(2));
+        } else {
+          commission = 0;
+        }
       }
 
       let total = 0;
       if (prev.type === 'Buy') total = subtotal + commission;
       else if (prev.type === 'Sell') total = subtotal - commission;
+      else if (prev.type === 'Dividend') total = subtotal - commission;
       else total = subtotal;
 
       return { ...prev, commission, total };
@@ -375,7 +444,7 @@ const handleNext = async () => {
     setCommMode('Auto');
     setError('');
 
-    onSave(snapshot, true);
+    onSave(snapshot, true, syncToIncomeExpense);
   };
 
   const inputCls =
@@ -512,7 +581,9 @@ const handleNext = async () => {
           </div>
 
           <div className="flex-1">
-            <label className={labelCls}>Price (৳)</label>
+            <label className={labelCls}>
+              {formData.type === 'Dividend' ? 'Total Dividend (৳)' : 'Price (৳)'}
+            </label>
             <input
               type="number"
               className={inputCls}
@@ -534,7 +605,7 @@ const handleNext = async () => {
           <div className="flex-1">
             <div className="flex items-center justify-between h-[20px] mb-1">
               <span className="text-[11px] font-bold text-white uppercase leading-none">
-                Comm (৳)
+                {formData.type === 'Dividend' ? 'TDS (৳)' : 'Comm (৳)'}
               </span>
               <button
                 type="button"
@@ -546,14 +617,18 @@ const handleNext = async () => {
             </div>
 
             <input
-              type="number"
-              value={formData.commission || 0}
-              onChange={e => set({ commission: +e.target.value })}
+              type={commMode === 'Manual' ? "number" : "text"}
+              value={
+                formData.type === 'Dividend' && commMode === 'Auto' && (!formData.price || formData.price === 0)
+                  ? '15%'
+                  : (commMode === 'Manual' ? (formData.commission ?? '') : (formData.commission || 0))
+              }
+              onChange={e => set({ commission: e.target.value === '' ? 0 : +e.target.value })}
               readOnly={commMode === 'Auto'}
               className={cn(
                 "w-full h-10 rounded-lg px-3 text-[11px] font-bold outline-none border",
                 commMode === 'Manual'
-                  ? "bg-black border-slate-700 text-white"
+                  ? "bg-black border-slate-700 text-white focus:border-teal-400/60"
                   : "bg-slate-800 border-slate-700 text-slate-400"
               )}
             />
@@ -562,7 +637,7 @@ const handleNext = async () => {
           <div className="flex-1">
             <div className="flex items-center h-[20px] mb-1">
               <span className="text-[11px] font-bold text-white uppercase leading-none">
-                Total (৳)
+                {formData.type === 'Dividend' ? 'Net Dividend (৳)' : 'Total (৳)'}
               </span>
             </div>
 
@@ -574,6 +649,35 @@ const handleNext = async () => {
             />
           </div>
         </div>
+
+        {/* Sync with Income & Expense option for new Deposit / Withdrawal / Dividend / Sell / Charge entries */}
+        {!editingTransaction && (formData.type === 'Deposit' || formData.type === 'Withdrawal' || formData.type === 'Dividend' || formData.type === 'Sell' || formData.type === 'Charge') && (
+          <div className="space-y-2">
+            <div
+              id="income-expense-sync-option"
+              onClick={() => setSyncToIncomeExpense(prev => !prev)}
+              className={cn(
+                "w-full p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between gap-3 select-none",
+                syncToIncomeExpense
+                  ? "bg-teal-950/40 border-teal-500/40 text-teal-300 shadow-[0_0_15px_rgba(45,212,191,0.08)]"
+                  : "bg-slate-950/60 border-slate-800 text-slate-400 hover:border-slate-700"
+              )}
+            >
+              <div className="min-w-0 flex-1">
+                <span className="text-[11px] font-bold text-white uppercase tracking-tight whitespace-nowrap">
+                  Sync with Income & Expense
+                </span>
+              </div>
+              <div className="shrink-0 pl-2" onClick={(e) => e.stopPropagation()}>
+                <Checkbox
+                  id="sync-to-income-expense-checkbox"
+                  checked={syncToIncomeExpense}
+                  onChange={(val) => setSyncToIncomeExpense(val)}
+                />
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Buttons */}
         <div className="pt-2 flex gap-3">
@@ -592,7 +696,7 @@ const handleNext = async () => {
                  setError('Please enter a valid quantity and price');
                  return;
               }
-              await onSave(formData as DseTransaction);
+              await onSave(formData as DseTransaction, false, syncToIncomeExpense);
               onClose();
             }}
             className="flex-1 px-4 py-2 rounded-lg bg-teal-400 text-slate-950 text-label font-bold uppercase hover:bg-teal-300 transition-colors"
@@ -1496,7 +1600,9 @@ const PortfolioAllocation: React.FC<PortfolioAllocationProps> = ({ holdings, tra
 // ── Main Component ─────────────────────────────────────────────────────────
 
 export const DseTrackerModule: React.FC<DseTrackerModuleProps & { activeTab?: DseTab }> = ({
-  holdings, onAdd, onUpdate, onDelete, onTitleChange, triggerAdd, setTriggerAdd, activeTab = 'summary'
+  holdings, onAdd, onUpdate, onDelete, onTitleChange, triggerAdd, setTriggerAdd, activeTab = 'summary',
+  onNavigateToModule, onDeleteLinkedTransfer, onUpdateLinkedTransfer,
+  onDeleteLinkedDseTransaction, onUpdateLinkedDseTransaction, onSyncSellProfitLoss
 }) => {
   const [isSettingsMenuOpen, setIsSettingsMenuOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
@@ -1507,17 +1613,109 @@ export const DseTrackerModule: React.FC<DseTrackerModuleProps & { activeTab?: Ds
     return () => window.removeEventListener('resize', handleResize);
   }, []);
   const [isRangeMenuOpen, setIsRangeMenuOpen] = useState(false);
-  const [historyRange, setHistoryRange] = useState<'all' | 'last12m' | 'fiscal' | 'custom'>('all');
+  // ─── Date Range Configuration (same range selector as Mutual Funds) ───
+  const [historyRange, setHistoryRange] = useState<'this' | 'fiscal' | 'custom'>('custom');
   const [historyCustomDates, setHistoryCustomDates] = useState(() => {
-    const now = new Date();
-    return { start: getFirstOfMonth(now), end: getTodayStr() };
+    return {
+      start: '2024-01-01',
+      end: getTodayStr(),
+    };
   });
+  const [historyThisMonthDate, setHistoryThisMonthDate] = useState(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
+  const [historyFiscalStartYear, setHistoryFiscalStartYear] = useState(() => {
+    const now = new Date();
+    return now.getMonth() >= 6 ? now.getFullYear() : now.getFullYear() - 1;
+  });
+  const navigateHistoryCustomMonth = (offset: number) => {
+    const currentStart = new Date(historyCustomDates.start);
+    const nextMonth = new Date(currentStart.getFullYear(), currentStart.getMonth() + offset, 1);
+    const now = new Date();
+    const isCurrentMonth =
+      nextMonth.getFullYear() === now.getFullYear() &&
+      nextMonth.getMonth() === now.getMonth();
+
+    setHistoryCustomDates({
+      start: getFirstOfMonth(nextMonth),
+      end: isCurrentMonth ? getTodayStr() : getLastOfMonth(nextMonth),
+    });
+  };
+
+  const navigateHistoryThisMonth = (offset: number) => {
+    setHistoryThisMonthDate(prev => new Date(prev.getFullYear(), prev.getMonth() + offset, 1));
+  };
+
+  const handleRangeChange = (newRange: 'this' | 'fiscal' | 'custom') => {
+    if (newRange === 'custom') {
+      setHistoryCustomDates({
+        start: '2024-01-01',
+        end: getTodayStr(),
+      });
+    }
+    setHistoryRange(newRange);
+    setIsRangeMenuOpen(false);
+  };
+
+  const formatHistoryThisMonthLabel = (d: Date) => {
+    const months = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    return `${months[d.getMonth()]} ${d.getFullYear()}`;
+  };
+
+  // Derive active date range for dashboard stats.
+  const rangeDates = useMemo(() => {
+    if (historyRange === 'this') {
+      return {
+        start: new Date(
+          historyThisMonthDate.getFullYear(),
+          historyThisMonthDate.getMonth(),
+          1
+        ),
+        end: new Date(
+          historyThisMonthDate.getFullYear(),
+          historyThisMonthDate.getMonth() + 1,
+          0,
+          23, 59, 59, 999
+        )
+      };
+    }
+
+    if (historyRange === 'fiscal') {
+      return {
+        start: new Date(historyFiscalStartYear, 6, 1),
+        end: new Date(historyFiscalStartYear + 1, 5, 30, 23, 59, 59, 999)
+      };
+    }
+
+    const start = historyCustomDates.start
+      ? new Date(historyCustomDates.start)
+      : new Date(0);
+    const end = historyCustomDates.end
+      ? new Date(historyCustomDates.end)
+      : new Date();
+
+    start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
+
+    return { start, end };
+  }, [
+    historyRange,
+    historyCustomDates,
+    historyThisMonthDate,
+    historyFiscalStartYear
+  ]);
 
   // ── Analytics Filters ──
   const [analyticsView, setAnalyticsView] = useState<'monthly' | 'cumulative'>('monthly');
   const [analyticsRange, setAnalyticsRange] = useState<'last6m' | 'last12m' | 'fiscal' | 'custom'>(() => 
     typeof window !== 'undefined' && window.innerWidth < 768 ? 'last6m' : 'last12m'
   );
+  const [analyticsMonthOffset, setAnalyticsMonthOffset] = useState(0);
+  const [analyticsFiscalOffset, setAnalyticsFiscalOffset] = useState(0);
   const [analyticsCustomDates, setAnalyticsCustomDates] = useState(() => {
     const now = new Date();
     const start = new Date(now.getFullYear(), now.getMonth() - 5, 1);
@@ -1529,6 +1727,8 @@ export const DseTrackerModule: React.FC<DseTrackerModuleProps & { activeTab?: Ds
   const [returnHistoryRange, setReturnHistoryRange] = useState<'last6m' | 'last12m' | 'fiscal' | 'custom'>(() => 
     typeof window !== 'undefined' && window.innerWidth < 768 ? 'last6m' : 'last12m'
   );
+  const [returnHistoryMonthOffset, setReturnHistoryMonthOffset] = useState(0);
+  const [returnHistoryFiscalOffset, setReturnHistoryFiscalOffset] = useState(0);
   const [returnHistoryCustomDates, setReturnHistoryCustomDates] = useState(() => {
     const now = new Date();
     const start = new Date(now.getFullYear(), now.getMonth() - 5, 1);
@@ -1541,21 +1741,68 @@ export const DseTrackerModule: React.FC<DseTrackerModuleProps & { activeTab?: Ds
     return { year: now.getFullYear(), month: now.getMonth() };
   });
 
-  const [tableMode, setTableMode] = useState<'1m' | '1y' | 'custom'>('1m');
-  const [tableOffset, setTableOffset] = useState(0);
+  const [tableRange, setTableRange] = useState<'this' | 'fiscal' | 'custom'>('this');
   const [tableCustomDates, setTableCustomDates] = useState(() => {
+    return {
+      start: '2024-01-01',
+      end: getTodayStr(),
+    };
+  });
+  const [tableThisMonthDate, setTableThisMonthDate] = useState(() => {
     const now = new Date();
-    return { start: getFirstOfMonth(now), end: getTodayStr() };
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
+  const [tableFiscalStartYear, setTableFiscalStartYear] = useState(() => {
+    const now = new Date();
+    return now.getMonth() >= 6 ? now.getFullYear() : now.getFullYear() - 1;
   });
   const [isTableTimeMenuOpen, setIsTableTimeMenuOpen] = useState(false);
+
+  const navigateTableCustomMonth = (offset: number) => {
+    const currentStart = new Date(tableCustomDates.start);
+    const nextMonth = new Date(currentStart.getFullYear(), currentStart.getMonth() + offset, 1);
+    const now = new Date();
+    const isCurrentMonth =
+      nextMonth.getFullYear() === now.getFullYear() &&
+      nextMonth.getMonth() === now.getMonth();
+
+    setTableCustomDates({
+      start: getFirstOfMonth(nextMonth),
+      end: isCurrentMonth ? getTodayStr() : getLastOfMonth(nextMonth),
+    });
+  };
+
+  const navigateTableThisMonth = (offset: number) => {
+    setTableThisMonthDate(prev => new Date(prev.getFullYear(), prev.getMonth() + offset, 1));
+  };
+
+  const handleTableRangeChange = (newRange: 'this' | 'fiscal' | 'custom') => {
+    if (newRange === 'custom') {
+      setTableCustomDates({
+        start: '2024-01-01',
+        end: getTodayStr(),
+      });
+    }
+    setTableRange(newRange);
+    setIsTableTimeMenuOpen(false);
+  };
+
+  const formatTableThisMonthLabel = (d: Date) => {
+    const months = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    return `${months[d.getMonth()]} ${d.getFullYear()}`;
+  };
+
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedPortfolio, setSelectedPortfolio] = useState<'Global' | 'Investment' | 'Trading'>('Global');
   const [isPortfolioMenuOpen, setIsPortfolioMenuOpen] = useState(false);
   const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
   const [isTypeMenuOpen, setIsTypeMenuOpen] = useState(false);
   const [sortBy, setSortBy] = useState<'date' | 'total' | 'ticker' | 'type'>('date');
-const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
-const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   const [confirmDialog, setConfirmDialog] = useState<{
     isOpen: boolean; 
@@ -1563,7 +1810,9 @@ const [selectedIds, setSelectedIds] = useState<string[]>([]);
     message: string; 
     onConfirm: () => void;
     confirmLabel?: string;
-    variant?: 'danger' | 'warning' | 'info';
+    cancelLabel?: string;
+    variant?: 'danger' | 'warning' | 'info' | 'severe' | 'critical';
+    details?: (string | null | undefined)[];
   }>({ isOpen: false, title: '', message: '', onConfirm: () => {} });
 
   const [transactions, setTransactions] = useState<DseTransaction[]>(() => getCachedData('dse'));
@@ -1837,6 +2086,13 @@ const pushToSheets = useCallback(async (action: 'update' | 'delete', transaction
           return updated;
         });
         await pushToSheets('delete', t);
+
+        if ((t.type === 'Deposit' || t.type === 'Withdrawal') && t.linkedIeGroupId && onDeleteLinkedTransfer) {
+          onDeleteLinkedTransfer(t.linkedIeGroupId);
+        }
+        if (onDeleteLinkedDseTransaction) {
+          onDeleteLinkedDseTransaction(t.id);
+        }
       },
     });
   };
@@ -1861,6 +2117,12 @@ const pushToSheets = useCallback(async (action: 'update' | 'delete', transaction
         // Sync each deletion (ideally batch, but existing pushToSheets handles one by one)
         for (const t of toDelete) {
           await pushToSheets('delete', t);
+          if ((t.type === 'Deposit' || t.type === 'Withdrawal') && t.linkedIeGroupId && onDeleteLinkedTransfer) {
+            onDeleteLinkedTransfer(t.linkedIeGroupId);
+          }
+        }
+        if (onDeleteLinkedDseTransaction) {
+          onDeleteLinkedDseTransaction(selectedIds);
         }
       }
     });
@@ -1916,120 +2178,115 @@ const pushToSheets = useCallback(async (action: 'update' | 'delete', transaction
     // Modal stays open — TransactionModal handles its own reset via resetForNext()
   };
 
-  // ── Stats range navigation ──
-  const navigateCustomMonth = (direction: -1 | 1) => {
-    const now = new Date();
-    let { year, month } = customNavMonth;
-    month += direction;
-    if (month < 0) { month = 11; year--; }
-    if (month > 11) { month = 0; year++; }
-    const navDate = new Date(year, month, 1);
-    const isCurrent = year === now.getFullYear() && month === now.getMonth();
-    setCustomNavMonth({ year, month });
-    setHistoryCustomDates({ start: getFirstOfMonth(navDate), end: isCurrent ? getTodayStr() : getLastOfMonth(navDate) });
-  };
-
-  const handleRangeChange = (newRange: 'all' | 'last12m' | 'fiscal' | 'custom') => {
-    if (newRange === 'custom') {
-      const now = new Date();
-      setCustomNavMonth({ year: now.getFullYear(), month: now.getMonth() });
-      setHistoryCustomDates({ start: getFirstOfMonth(now), end: getTodayStr() });
-    }
-    setHistoryRange(newRange);
-    setIsRangeMenuOpen(false);
-  };
-
   const { startStr, endStr } = useMemo(() => {
-    const now = new Date();
-    const toStr = (d: Date) =>
-      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    if (historyRange === 'all') return { startStr: '0000-01-01', endStr: '9999-12-31' };
-    if (historyRange === 'last12m') return {
-      startStr: toStr(new Date(now.getFullYear(), now.getMonth() - 11, 1)),
-      endStr: toStr(new Date(now.getFullYear(), now.getMonth() + 1, 0)),
+    return {
+      startStr: toDateStr(rangeDates.start),
+      endStr: toDateStr(rangeDates.end),
     };
-    if (historyRange === 'fiscal') {
-      const fy = now.getMonth() >= 6 ? now.getFullYear() : now.getFullYear() - 1;
-      return { startStr: `${fy}-07-01`, endStr: `${fy + 1}-06-30` };
-    }
-    return { startStr: historyCustomDates.start || '0000-01-01', endStr: historyCustomDates.end || '9999-12-31' };
-  }, [historyRange, historyCustomDates]);
+  }, [rangeDates]);
 
   // ── Title ──
   useEffect(() => {
     if (!onTitleChange) return;
-    if (historyRange === 'all') { onTitleChange('DSE Tracker'); return; }
-    const now = new Date();
-    let startDate: Date, endDate: Date;
-    if (historyRange === 'last12m') {
-      startDate = new Date(now.getFullYear(), now.getMonth() - 11, 1); endDate = now;
-    } else if (historyRange === 'fiscal') {
-      const fy = now.getMonth() >= 6 ? now.getFullYear() : now.getFullYear() - 1;
-      startDate = new Date(fy, 6, 1); endDate = new Date(fy + 1, 5, 30);
-    } else {
-      const [sy, sm] = (historyCustomDates.start || '').split('-').map(Number);
-      const [ey, em] = (historyCustomDates.end || '').split('-').map(Number);
-      startDate = sy ? new Date(sy, sm - 1, 1) : now;
-      endDate = ey ? new Date(ey, em - 1, 1) : now;
-    }
+    const { start, end } = rangeDates;
+    const startDisplayStr = start.toLocaleString('default', { month: 'short', year: 'numeric' });
+    const endDisplayStr = end.toLocaleString('default', { month: 'short', year: 'numeric' });
     onTitleChange(
       <span className="flex items-center gap-2">
         DSE TRACKER{' '}
         <span className="text-teal-400 font-display text-sm font-bold opacity-100 tracking-wider leading-none">
-          / {startDate.toLocaleString('default', { month: 'short', year: 'numeric' })} - {endDate.toLocaleString('default', { month: 'short', year: 'numeric' })}
+          / {startDisplayStr} - {endDisplayStr}
         </span>
       </span>
     );
     return () => { onTitleChange('DSE Tracker'); };
-  }, [historyRange, historyCustomDates, onTitleChange]);
+  }, [rangeDates, onTitleChange, historyRange]);
 
   // ── Stats computation ──
   const stats = useMemo(() => {
     const inRange = (d: string) => d >= startStr && d <= endStr;
     const beforeEnd = (d: string) => d <= endStr;
+    const beforeStart = (d: string) => d < startStr;
     const typePriority: Record<string, number> = { Deposit: 1, Buy: 2, Dividend: 3, Sell: 4, Charge: 5 };
     const sorted = [...transactions].sort((a, b) => {
       const dd = new Date(a.date).getTime() - new Date(b.date).getTime();
       return dd !== 0 ? dd : (typePriority[a.type] || 99) - (typePriority[b.type] || 99);
     });
     let totalDeposits = 0, totalWithdrawals = 0, totalDividends = 0, totalCharges = 0, totalRealizedPnL = 0;
-    let totalDepositsRange = 0, totalRealizedPnLRange = 0, totalDividendsRange = 0, totalChargesRange = 0;
+    let totalDepositsStart = 0, totalWithdrawalsStart = 0, totalDividendsStart = 0, totalChargesStart = 0, totalRealizedPnLStart = 0;
+    let totalDepositsRange = 0, totalWithdrawalsRange = 0, totalRealizedPnLRange = 0, totalDividendsRange = 0, totalChargesRange = 0;
+    let totalBuyInvestmentRange = 0, totalBuyTradingRange = 0;
+    let totalCostOfSoldInvestmentRange = 0, totalCostOfSoldTradingRange = 0;
     let totalDepositsThisMonth = 0;
     const monthStart = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-01`;
     const hMap: Record<string, { qty: number; totalCost: number; portfolio: string }> = {};
+    const hMapStart: Record<string, { qty: number; totalCost: number; portfolio: string }> = {};
 
     sorted.forEach(t => {
       const key = t.ticker ? `${t.portfolio}|${t.ticker}` : null;
       if (t.type === 'Deposit') {
+        if (beforeStart(t.date)) totalDepositsStart += Math.abs(t.total);
         if (beforeEnd(t.date)) totalDeposits += Math.abs(t.total);
         if (inRange(t.date)) totalDepositsRange += Math.abs(t.total);
         if (t.date >= monthStart) totalDepositsThisMonth += Math.abs(t.total);
       } else if (t.type === 'Withdrawal') {
+        if (beforeStart(t.date)) totalWithdrawalsStart += Math.abs(t.total);
         if (beforeEnd(t.date)) totalWithdrawals += Math.abs(t.total);
+        if (inRange(t.date)) totalWithdrawalsRange += Math.abs(t.total);
       } else if (t.type === 'Charge') {
+        if (beforeStart(t.date)) totalChargesStart += Math.abs(t.total);
         if (beforeEnd(t.date)) totalCharges += Math.abs(t.total);
         if (inRange(t.date)) totalChargesRange += Math.abs(t.total);
       } else if (t.type === 'Dividend') {
+        if (beforeStart(t.date)) totalDividendsStart += Math.abs(t.total);
         if (beforeEnd(t.date)) totalDividends += Math.abs(t.total);
         if (inRange(t.date)) totalDividendsRange += Math.abs(t.total);
       } else if (t.type === 'Buy') {
+        if (inRange(t.date)) {
+          if (t.portfolio === 'Investment') totalBuyInvestmentRange += Math.abs(t.total);
+          if (t.portfolio === 'Trading') totalBuyTradingRange += Math.abs(t.total);
+        }
+        if (key && beforeStart(t.date)) {
+          if (!hMapStart[key]) hMapStart[key] = { qty: 0, totalCost: 0, portfolio: t.portfolio };
+          hMapStart[key].qty += t.qty; hMapStart[key].totalCost += t.total;
+        }
         if (!key || !beforeEnd(t.date)) return;
         if (!hMap[key]) hMap[key] = { qty: 0, totalCost: 0, portfolio: t.portfolio };
         hMap[key].qty += t.qty; hMap[key].totalCost += t.total;
       } else if (t.type === 'Sell') {
+        if (key && beforeStart(t.date)) {
+          if (!hMapStart[key]) hMapStart[key] = { qty: 0, totalCost: 0, portfolio: t.portfolio };
+          const hs = hMapStart[key];
+          if (hs.qty > 0) {
+            const avg = hs.totalCost / hs.qty;
+            const costSold = Math.min(t.qty, hs.qty) * avg;
+            const pnl = t.total - costSold;
+            totalRealizedPnLStart += pnl;
+            hs.qty = Math.max(0, hs.qty - t.qty);
+            hs.totalCost = Math.max(0, hs.totalCost - costSold);
+          }
+        }
         if (!key || !beforeEnd(t.date)) return;
         if (!hMap[key]) hMap[key] = { qty: 0, totalCost: 0, portfolio: t.portfolio };
         const h = hMap[key];
         if (h.qty > 0) {
           const avg = h.totalCost / h.qty;
-          const pnl = t.total - t.qty * avg;
+          const costSold = Math.min(t.qty, h.qty) * avg;
+          const pnl = t.total - costSold;
           if (beforeEnd(t.date)) totalRealizedPnL += pnl;
-          if (inRange(t.date)) totalRealizedPnLRange += pnl;
+          if (inRange(t.date)) {
+            totalRealizedPnLRange += pnl;
+            if (t.portfolio === 'Investment') totalCostOfSoldInvestmentRange += costSold;
+            if (t.portfolio === 'Trading') totalCostOfSoldTradingRange += costSold;
+          }
           h.qty = Math.max(0, h.qty - t.qty);
-          h.totalCost = Math.max(0, h.totalCost - t.qty * avg);
+          h.totalCost = Math.max(0, h.totalCost - costSold);
         }
       }
     });
+
+    const stockCostStart = Object.values(hMapStart).reduce((s, h) => s + h.totalCost, 0);
+    const cashBalanceStart = totalDepositsStart - totalWithdrawalsStart - stockCostStart + totalRealizedPnLStart + totalDividendsStart - totalChargesStart;
 
     const stockCost = Object.values(hMap).reduce((s, h) => s + h.totalCost, 0);
     const cashBalance = totalDeposits - totalWithdrawals - stockCost + totalRealizedPnL + totalDividends - totalCharges;
@@ -2037,14 +2294,30 @@ const pushToSheets = useCallback(async (action: 'update' | 'delete', transaction
     const tradingHolding = Object.values(hMap).filter(h => h.portfolio === 'Trading').reduce((s, h) => s + h.totalCost, 0);
     const totalProfit = totalRealizedPnLRange + totalDividendsRange - totalChargesRange;
 
+    // Cost Value of Stocks = Total Invested + Dividend - Withdrawal + Realized P&L - Cash Balance + Cash Balance from start date - Charge
+    const costValueOfStocks = totalDepositsRange + totalDividendsRange - totalWithdrawalsRange + totalRealizedPnLRange - cashBalance + cashBalanceStart - totalChargesRange;
+    const investmentRange = totalBuyInvestmentRange - totalCostOfSoldInvestmentRange;
+    const tradingRange = totalBuyTradingRange - totalCostOfSoldTradingRange;
+
     return {
       currentHolding: stockCost + cashBalance,
       stockCost, investmentHolding, tradingHolding, cashBalance,
-      totalInvested: totalDeposits, totalInvestedRange: totalDepositsRange, totalWithdrawals,
+      cashBalanceStart,
+      costValueOfStocks,
+      totalInvested: totalDeposits, totalInvestedRange: totalDepositsRange,
+      totalWithdrawals,
+      totalWithdrawalsRange,
       totalProfit,
       profitPercentage: stockCost > 0 ? (totalProfit / stockCost) * 100 : 0,
-      realizedPnL: totalRealizedPnL,
-      dividendReceived: totalDividends,
+      realizedPnL: totalRealizedPnLRange,
+      dividendReceived: totalDividendsRange,
+      investmentRange,
+      investmentBuyRange: totalBuyInvestmentRange,
+      costOfSoldInvestmentRange: totalCostOfSoldInvestmentRange,
+      tradingBuyRange: totalBuyTradingRange,
+      costOfSoldTradingRange: totalCostOfSoldTradingRange,
+      tradingRange,
+      stocksBuyRange: totalBuyInvestmentRange + totalBuyTradingRange,
       activeInvestmentSnapshot: totalDeposits - totalWithdrawals,
       totalDepositsSnapshot: totalDeposits,
       totalDepositsThisMonth,
@@ -2052,33 +2325,55 @@ const pushToSheets = useCallback(async (action: 'update' | 'delete', transaction
     };
   }, [transactions, startStr, endStr]);
 
-  // ── Table date range ──
-  const { tableStartStr, tableEndStr, tablePeriodLabel } = useMemo(() => {
-    const now = new Date();
-    if (tableMode === '1m') {
-      const endMonth = now.getMonth() - tableOffset;
-      const s = new Date(now.getFullYear(), endMonth, 1);
-      const e = new Date(now.getFullYear(), endMonth + 1, 0);
+  // ── Table date range (same logic as Mutual Funds) ──
+  const tableRangeDates = useMemo(() => {
+    if (tableRange === 'this') {
       return {
-        tableStartStr: toDateStr(s),
-        tableEndStr: tableOffset === 0 ? getTodayStr() : toDateStr(e),
-        tablePeriodLabel: s.toLocaleString('default', { month: 'short', year: 'numeric' }).toUpperCase(),
+        start: new Date(
+          tableThisMonthDate.getFullYear(),
+          tableThisMonthDate.getMonth(),
+          1
+        ),
+        end: new Date(
+          tableThisMonthDate.getFullYear(),
+          tableThisMonthDate.getMonth() + 1,
+          0,
+          23, 59, 59, 999
+        )
       };
     }
-    if (tableMode === '1y') {
-      const year = now.getFullYear() - tableOffset;
+
+    if (tableRange === 'fiscal') {
       return {
-        tableStartStr: `${year}-01-01`,
-        tableEndStr: tableOffset === 0 ? getTodayStr() : `${year}-12-31`,
-        tablePeriodLabel: `${year}`,
+        start: new Date(tableFiscalStartYear, 6, 1),
+        end: new Date(tableFiscalStartYear + 1, 5, 30, 23, 59, 59, 999)
       };
     }
+
+    const start = tableCustomDates.start
+      ? new Date(tableCustomDates.start)
+      : new Date(0);
+    const end = tableCustomDates.end
+      ? new Date(tableCustomDates.end)
+      : new Date();
+
+    start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
+
+    return { start, end };
+  }, [
+    tableRange,
+    tableCustomDates,
+    tableThisMonthDate,
+    tableFiscalStartYear
+  ]);
+
+  const { tableStartStr, tableEndStr } = useMemo(() => {
     return {
-      tableStartStr: tableCustomDates.start || '0000-01-01',
-      tableEndStr: tableCustomDates.end || '9999-12-31',
-      tablePeriodLabel: 'CUSTOM',
+      tableStartStr: toDateStr(tableRangeDates.start),
+      tableEndStr: toDateStr(tableRangeDates.end),
     };
-  }, [tableMode, tableOffset, tableCustomDates]);
+  }, [tableRangeDates]);
 
   // ── Filtered rows ──
   const filteredTransactions = useMemo(() => {
@@ -2103,20 +2398,79 @@ const pushToSheets = useCallback(async (action: 'update' | 'delete', transaction
     return r;
   }, [transactions, tableStartStr, tableEndStr, selectedPortfolio, selectedTypes, searchQuery, sortBy, sortOrder]);
 
+  // ── Profit / Loss calculation map for Sell transactions ──
+  const transactionPnLMap = useMemo(() => {
+    const pnlMap: Record<string, number> = {};
+    const holdingsMap: Record<string, { qty: number; cost: number }> = {};
+
+    const typePriority: Record<string, number> = { Deposit: 0, Buy: 1, Dividend: 2, Charge: 3, Sell: 4, Withdrawal: 5 };
+
+    const sorted = [...transactions].sort((a, b) => {
+      const diff = new Date(a.date).getTime() - new Date(b.date).getTime();
+      if (diff !== 0) return diff;
+      const pDiff = (typePriority[a.type] ?? 9) - (typePriority[b.type] ?? 9);
+      if (pDiff !== 0) return pDiff;
+      return (a.id || '').localeCompare(b.id || '');
+    });
+
+    sorted.forEach(t => {
+      if (!t.ticker) return;
+      const key = `${t.portfolio}|${t.ticker}`;
+      if (t.type === 'Buy') {
+        if (!holdingsMap[key]) holdingsMap[key] = { qty: 0, cost: 0 };
+        holdingsMap[key].qty += t.qty;
+        holdingsMap[key].cost += t.total;
+      } else if (t.type === 'Sell') {
+        if (!holdingsMap[key]) holdingsMap[key] = { qty: 0, cost: 0 };
+        const h = holdingsMap[key];
+        let pnl = 0;
+        if (h.qty > 0) {
+          const avg = h.cost / h.qty;
+          const costSold = avg * Math.min(t.qty, h.qty);
+          pnl = t.total - costSold;
+          h.qty = Math.max(0, h.qty - t.qty);
+          h.cost = Math.max(0, h.cost - costSold);
+        } else {
+          pnl = t.total;
+        }
+        pnlMap[t.id] = pnl;
+      }
+    });
+
+    return pnlMap;
+  }, [transactions]);
+
   const handleSort = (key: typeof sortBy) => {
     if (sortBy === key) setSortOrder(o => o === 'asc' ? 'desc' : 'asc');
     else { setSortBy(key); setSortOrder('desc'); }
   };
 
+  const [lastSelectedId, setLastSelectedId] = useState<string | null>(null);
+
   const toggleSelectAll = () => {
     if (selectedIds.length === filteredTransactions.length && filteredTransactions.length > 0) {
       setSelectedIds([]);
+      setLastSelectedId(null);
     } else {
       setSelectedIds(filteredTransactions.map(t => t.id));
     }
   };
 
-  const toggleSelect = (id: string) => {
+  const toggleSelect = (id: string, e?: React.MouseEvent) => {
+    if (e?.shiftKey && lastSelectedId && lastSelectedId !== id) {
+      const lastIdx = filteredTransactions.findIndex(t => t.id === lastSelectedId);
+      const currIdx = filteredTransactions.findIndex(t => t.id === id);
+      if (lastIdx !== -1 && currIdx !== -1) {
+        const start = Math.min(lastIdx, currIdx);
+        const end = Math.max(lastIdx, currIdx);
+        const rangeIds = filteredTransactions.slice(start, end + 1).map(t => t.id);
+        setSelectedIds(prev => Array.from(new Set([...prev, ...rangeIds])));
+        setLastSelectedId(id);
+        return;
+      }
+    }
+
+    setLastSelectedId(id);
     if (selectedIds.includes(id)) {
       setSelectedIds(selectedIds.filter(i => i !== id));
     } else {
@@ -2149,20 +2503,27 @@ const pushToSheets = useCallback(async (action: 'update' | 'delete', transaction
 
   const { analyticsStartStr, analyticsEndStr } = useMemo(() => {
     const now = new Date();
+    const todayStr = getTodayStr();
+
     if (analyticsRange === 'last6m') {
-      const start = new Date(now.getFullYear(), now.getMonth() - 5, 1);
-      return { analyticsStartStr: toDateStr(start), analyticsEndStr: getTodayStr() };
+      const targetEnd = new Date(now.getFullYear(), now.getMonth() + analyticsMonthOffset + 1, 0);
+      const targetStart = new Date(now.getFullYear(), now.getMonth() + analyticsMonthOffset - 5, 1);
+      const endStr = analyticsMonthOffset === 0 ? todayStr : toDateStr(targetEnd);
+      return { analyticsStartStr: toDateStr(targetStart), analyticsEndStr: endStr };
     }
     if (analyticsRange === 'last12m') {
-      const start = new Date(now.getFullYear(), now.getMonth() - 11, 1);
-      return { analyticsStartStr: toDateStr(start), analyticsEndStr: getTodayStr() };
+      const targetEnd = new Date(now.getFullYear(), now.getMonth() + analyticsMonthOffset + 1, 0);
+      const targetStart = new Date(now.getFullYear(), now.getMonth() + analyticsMonthOffset - 11, 1);
+      const endStr = analyticsMonthOffset === 0 ? todayStr : toDateStr(targetEnd);
+      return { analyticsStartStr: toDateStr(targetStart), analyticsEndStr: endStr };
     }
     if (analyticsRange === 'fiscal') {
       const currentYear = now.getFullYear();
       const isPostJuly = now.getMonth() >= 6;
-      const startYear = isPostJuly ? currentYear : currentYear - 1;
-      const start = `${startYear}-07-01`;
-      return { analyticsStartStr: start, analyticsEndStr: getTodayStr() };
+      const baseStartYear = (isPostJuly ? currentYear : currentYear - 1) + analyticsFiscalOffset;
+      const start = `${baseStartYear}-07-01`;
+      const end = analyticsFiscalOffset === 0 ? todayStr : `${baseStartYear + 1}-06-30`;
+      return { analyticsStartStr: start, analyticsEndStr: end };
     }
     // For custom, we want to include the whole month if the start date is within it
     const customStart = analyticsCustomDates.start ? new Date(analyticsCustomDates.start) : new Date(0);
@@ -2171,26 +2532,68 @@ const pushToSheets = useCallback(async (action: 'update' | 'delete', transaction
       analyticsStartStr: toDateStr(startOfCustomMonth), 
       analyticsEndStr: analyticsCustomDates.end || '9999-12-31' 
     };
-  }, [analyticsRange, analyticsCustomDates]);
+  }, [analyticsRange, analyticsMonthOffset, analyticsFiscalOffset, analyticsCustomDates]);
+
+  const navigateAnalyticsDate = (dir: -1 | 1) => {
+    if (analyticsRange === 'last6m' || analyticsRange === 'last12m') {
+      setAnalyticsMonthOffset(prev => prev + dir);
+    } else if (analyticsRange === 'fiscal') {
+      setAnalyticsFiscalOffset(prev => prev + dir);
+    } else if (analyticsRange === 'custom') {
+      setAnalyticsCustomDates(prev => {
+        const s = new Date(prev.start || getTodayStr());
+        const e = new Date(prev.end || getTodayStr());
+        const newS = new Date(s.getFullYear(), s.getMonth() + dir, 1);
+        const newE = new Date(e.getFullYear(), e.getMonth() + dir + 1, 0);
+        return { start: toDateStr(newS), end: toDateStr(newE) };
+      });
+    }
+  };
 
   const { returnHistoryStartStr, returnHistoryEndStr } = useMemo(() => {
     const now = new Date();
+    const todayStr = getTodayStr();
+
     if (returnHistoryRange === 'last6m') {
-      const start = new Date(now.getFullYear(), now.getMonth() - 5, 1);
-      return { returnHistoryStartStr: toDateStr(start), returnHistoryEndStr: getTodayStr() };
+      const targetEnd = new Date(now.getFullYear(), now.getMonth() + returnHistoryMonthOffset + 1, 0);
+      const targetStart = new Date(now.getFullYear(), now.getMonth() + returnHistoryMonthOffset - 5, 1);
+      const endStr = returnHistoryMonthOffset === 0 ? todayStr : toDateStr(targetEnd);
+      return { returnHistoryStartStr: toDateStr(targetStart), returnHistoryEndStr: endStr };
     }
     if (returnHistoryRange === 'last12m') {
-      const start = new Date(now.getFullYear(), now.getMonth() - 11, 1);
-      return { returnHistoryStartStr: toDateStr(start), returnHistoryEndStr: getTodayStr() };
+      const targetEnd = new Date(now.getFullYear(), now.getMonth() + returnHistoryMonthOffset + 1, 0);
+      const targetStart = new Date(now.getFullYear(), now.getMonth() + returnHistoryMonthOffset - 11, 1);
+      const endStr = returnHistoryMonthOffset === 0 ? todayStr : toDateStr(targetEnd);
+      return { returnHistoryStartStr: toDateStr(targetStart), returnHistoryEndStr: endStr };
     }
     if (returnHistoryRange === 'fiscal') {
-      const fy = now.getMonth() >= 6 ? now.getFullYear() : now.getFullYear() - 1;
-      return { returnHistoryStartStr: `${fy}-07-01`, returnHistoryEndStr: getTodayStr() };
+      const currentYear = now.getFullYear();
+      const isPostJuly = now.getMonth() >= 6;
+      const baseStartYear = (isPostJuly ? currentYear : currentYear - 1) + returnHistoryFiscalOffset;
+      const start = `${baseStartYear}-07-01`;
+      const end = returnHistoryFiscalOffset === 0 ? todayStr : `${baseStartYear + 1}-06-30`;
+      return { returnHistoryStartStr: start, returnHistoryEndStr: end };
     }
     const customStart = returnHistoryCustomDates.start ? new Date(returnHistoryCustomDates.start) : new Date(0);
     const startOfCustomMonth = new Date(customStart.getFullYear(), customStart.getMonth(), 1);
     return { returnHistoryStartStr: toDateStr(startOfCustomMonth), returnHistoryEndStr: returnHistoryCustomDates.end || '9999-12-31' };
-  }, [returnHistoryRange, returnHistoryCustomDates]);
+  }, [returnHistoryRange, returnHistoryMonthOffset, returnHistoryFiscalOffset, returnHistoryCustomDates]);
+
+  const navigateReturnHistoryDate = (dir: -1 | 1) => {
+    if (returnHistoryRange === 'last6m' || returnHistoryRange === 'last12m') {
+      setReturnHistoryMonthOffset(prev => prev + dir);
+    } else if (returnHistoryRange === 'fiscal') {
+      setReturnHistoryFiscalOffset(prev => prev + dir);
+    } else if (returnHistoryRange === 'custom') {
+      setReturnHistoryCustomDates(prev => {
+        const s = new Date(prev.start || getTodayStr());
+        const e = new Date(prev.end || getTodayStr());
+        const newS = new Date(s.getFullYear(), s.getMonth() + dir, 1);
+        const newE = new Date(e.getFullYear(), e.getMonth() + dir + 1, 0);
+        return { start: toDateStr(newS), end: toDateStr(newE) };
+      });
+    }
+  };
 
   const chartData = useMemo(() => {
     const relevant = transactions.filter(t => t.date <= analyticsEndStr);
@@ -2383,32 +2786,129 @@ const pushToSheets = useCallback(async (action: 'update' | 'delete', transaction
         ])
     ).values()
   ]}
-        onSave={async (t, keepOpen?: boolean) => {
+                                onSave={async (t, keepOpen?: boolean, syncToIncomeExpense?: boolean) => {
+          const isNewEntry = !editingTransaction;
+          let updatedTransactions: DseTransaction[] = [];
           if (editingTransaction) {
             setTransactions(prev => {
-              const updated = prev.map(tx => tx.id === t.id ? t : tx);
-              localStorage.setItem('sheet_cache_dse', JSON.stringify(updated));
-              return updated;
+              updatedTransactions = prev.map(tx => tx.id === t.id ? t : tx);
+              localStorage.setItem('sheet_cache_dse', JSON.stringify(updatedTransactions));
+              return updatedTransactions;
             });
             setIsTransactionModalOpen(false);
+
+            // Keep the linked Income & Expense transfer pair in sync
+            if ((t.type === 'Deposit' || t.type === 'Withdrawal') && t.linkedIeGroupId && onUpdateLinkedTransfer) {
+              onUpdateLinkedTransfer(t.linkedIeGroupId, {
+                date: t.date,
+                amount: t.total,
+                description: t.notes
+              });
+            }
+
+            // Keep linked Income & Expense transaction in sync (e.g. Dividend, Charge, Sell).
+            if (onUpdateLinkedDseTransaction) {
+              if (t.type === 'Sell') {
+                const ticker = t.ticker ? t.ticker.toUpperCase() : '';
+                const sellDesc = ticker ? `Stocks P&L: ${ticker}` : 'Stocks P&L';
+                onUpdateLinkedDseTransaction(t.id, {
+                  date: t.date,
+                  amount: computeSellRealizedPnL(t, updatedTransactions),
+                  description: t.notes?.trim() ? t.notes : sellDesc
+                });
+              } else {
+                onUpdateLinkedDseTransaction(t.id, {
+                  date: t.date,
+                  amount: t.total,
+                  description: t.notes || (t.type === 'Dividend' ? (t.ticker ? `Dividend: ${t.ticker}` : 'BO Account Dividend') : t.type === 'Charge' ? 'BO Account Charge' : undefined)
+                });
+              }
+            }
+
+            // If changing away from Sell, remove linked P&L
+            if (editingTransaction.type === 'Sell' && t.type !== 'Sell' && onDeleteLinkedDseTransaction) {
+              onDeleteLinkedDseTransaction(t.id);
+            }
           } else {
             setTransactions(prev => {
-              const updated = [...prev, t];
-              localStorage.setItem('sheet_cache_dse', JSON.stringify(updated));
-              return updated;
+              updatedTransactions = [...prev, t];
+              localStorage.setItem('sheet_cache_dse', JSON.stringify(updatedTransactions));
+              return updatedTransactions;
             });
             if (!keepOpen) setIsTransactionModalOpen(false);
           }
-          await pushToSheets('update', t);
-        }}
-      />
 
-      {/* Confirm dialog */}
-      <ConfirmDialog
-        isOpen={confirmDialog.isOpen}
-        message={confirmDialog.message}
-        onConfirm={confirmDialog.onConfirm}
-        onCancel={() => setConfirmDialog(prev => ({ ...prev, isOpen: false }))}
+          // Calculate realized P&L for pre-filling the Income & Expense entry below.
+          let sellPnL = 0;
+          if (t.type === 'Sell') {
+            sellPnL = computeSellRealizedPnL(t, updatedTransactions);
+          }
+
+          // Brand-new Deposit / Withdrawal / Dividend / Charge / Sell entries are mirrored in Income & Expense.
+          if (isNewEntry && !keepOpen && syncToIncomeExpense && onNavigateToModule) {
+            if (t.type === 'Deposit') {
+              onNavigateToModule('income-expense', {
+                date: t.date,
+                amount: t.total,
+                type: 'Transfer',
+                targetModule: 'dse',
+                description: t.notes,
+                linkedTxId: t.id
+              });
+            } else if (t.type === 'Withdrawal') {
+              onNavigateToModule('income-expense', {
+                date: t.date,
+                amount: t.total,
+                type: 'Transfer',
+                targetModule: 'dse-withdrawal',
+                description: t.notes,
+                linkedTxId: t.id,
+                accountId: 'bdt-bo-account'
+              });
+            } else if (t.type === 'Dividend') {
+              onNavigateToModule('income-expense', {
+                date: t.date,
+                amount: t.total,
+                type: 'Income',
+                targetModule: 'dse-dividend',
+                description: t.notes || (t.ticker ? `Dividend: ${t.ticker}` : 'BO Account Dividend'),
+                linkedTxId: t.id,
+                accountId: 'bdt-bo-account',
+                category: 'Finance Income',
+                subCategory: 'Dividend'
+              });
+            } else if (t.type === 'Charge') {
+              onNavigateToModule('income-expense', {
+                date: t.date,
+                amount: t.total,
+                type: 'Expense',
+                targetModule: 'dse-charge',
+                description: t.notes || 'BO Account Charge',
+                linkedTxId: t.id,
+                accountId: 'bdt-bo-account',
+                category: 'Other Expense',
+                subCategory: 'Other Bank Charges'
+              });
+            } else if (t.type === 'Sell') {
+              const ticker = t.ticker ? t.ticker.toUpperCase() : '';
+              const sellDesc = ticker ? `Stocks P&L: ${ticker}` : 'Stocks P&L';
+
+              onNavigateToModule('income-expense', {
+                date: t.date,
+                amount: sellPnL,
+                type: 'Income',
+                targetModule: 'dse-sell',
+                description: t.notes?.trim() ? t.notes : sellDesc,
+                linkedTxId: t.id,
+                accountId: 'bdt-bo-account',
+                category: 'Capital Gain',
+                subCategory: 'Stocks Capital Gain'
+              });
+            }
+          }
+
+          pushToSheets('update', t);
+        }}
       />
 
       {/* API status toast */}
@@ -2429,43 +2929,83 @@ const pushToSheets = useCallback(async (action: 'update' | 'delete', transaction
       ══════════════════════════════════════════════════ */}
       {activeTab === 'summary' && (
         <div className="space-y-8">
-          {/* ── Stats Date Range Selector ── */}
+          {/* ── Stats Date Range Selector — same UI/behavior as Mutual Funds ── */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/50 border border-slate-800 rounded-xl p-2 relative">
             <div className="flex flex-col sm:flex-row sm:items-center gap-3 w-full sm:w-auto">
               <div className="flex items-center justify-between w-full sm:w-auto gap-2">
                 <div className="relative flex-1 sm:flex-none">
-                  {/* Mobile */}
+                  {/* Mobile View: Dropdown */}
                   <div className="block sm:hidden">
-                    <button onClick={() => setIsRangeMenuOpen(!isRangeMenuOpen)}
-                      className="flex items-center justify-between gap-4 bg-slate-950 border border-slate-800 rounded-lg px-4 h-9 text-[10px] font-bold text-slate-300 hover:text-white transition-all uppercase w-full">
+                    <button
+                      onClick={() => setIsRangeMenuOpen(!isRangeMenuOpen)}
+                      className="flex items-center justify-between gap-4 bg-slate-950 border border-slate-800 rounded-lg px-4 h-9 text-[10px] font-bold text-slate-300 hover:text-white transition-all uppercase w-full"
+                    >
                       <div className="flex items-center gap-2">
                         <Calendar size={14} className="text-teal-400" />
-                        {historyRange === 'all' ? 'Overall' : historyRange === 'last12m' ? 'Last 12M' : historyRange === 'fiscal' ? 'Fiscal' : 'Custom'}
+                        {historyRange === 'this'
+                          ? 'This month'
+                          : historyRange === 'fiscal'
+                            ? 'Fiscal'
+                            : 'Custom'}
                       </div>
-                      <ChevronDown size={14} className={cn("text-slate-500 transition-transform", isRangeMenuOpen ? "rotate-180 text-teal-400" : "")} />
+                      <ChevronDown
+                        size={14}
+                        className={cn(
+                          "text-slate-500 transition-transform",
+                          isRangeMenuOpen ? "rotate-180 text-teal-400" : ""
+                        )}
+                      />
                     </button>
                     {isRangeMenuOpen && (
                       <>
-                        <div className="fixed inset-0 z-40" onClick={() => setIsRangeMenuOpen(false)} />
+                        <div
+                          className="fixed inset-0 z-40"
+                          onClick={() => setIsRangeMenuOpen(false)}
+                        />
                         <div className="absolute left-0 mt-2 w-full bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95">
-                          {['all', 'last12m', 'fiscal', 'custom'].map(id => (
-                            <button key={id} onClick={() => handleRangeChange(id as any)}
-                              className={cn("w-full text-left px-3 py-2 text-[10px] font-bold rounded-lg transition-colors uppercase",
-                                historyRange === id ? "bg-teal-400 text-slate-950" : "text-slate-300 hover:bg-slate-800")}>
-                              {id === 'all' ? 'Overall' : id === 'last12m' ? 'Last 12M' : id === 'fiscal' ? 'Fiscal' : 'Custom'}
+                          {(['this', 'fiscal', 'custom'] as const).map(id => (
+                            <button
+                              key={id}
+                              onClick={() => {
+                                handleRangeChange(id);
+                                setIsRangeMenuOpen(false);
+                              }}
+                              className={cn(
+                                "w-full text-left px-3 py-2 text-[10px] font-bold rounded-lg transition-colors uppercase",
+                                historyRange === id
+                                  ? "bg-teal-400 text-slate-950"
+                                  : "text-slate-300 hover:bg-slate-800"
+                              )}
+                            >
+                              {id === 'this'
+                                ? 'This month'
+                                : id === 'fiscal'
+                                  ? 'Fiscal'
+                                  : 'Custom'}
                             </button>
                           ))}
                         </div>
                       </>
                     )}
                   </div>
-                  {/* Desktop */}
-                  <div className="hidden sm:flex items-center bg-slate-950/50 rounded-lg p-1 border border-slate-800/50 gap-1">
-                    {['all', 'last12m', 'fiscal', 'custom'].map(id => (
-                      <button key={id} onClick={() => handleRangeChange(id as any)}
-                        className={cn("px-4 py-1.5 rounded-md text-[10px] font-bold uppercase transition-all border",
-                          historyRange === id ? "bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/20" : "bg-slate-900/40 border-slate-800/40 text-slate-300 hover:text-white")}>
-                        {id === 'all' ? 'Overall' : id === 'last12m' ? 'Last 12M' : id === 'fiscal' ? 'Fiscal' : 'Custom'}
+                  {/* Desktop View: Tabs */}
+                  <div className="hidden sm:flex items-center bg-slate-950/50 rounded-lg p-1 border border-slate-800/50 gap-1 font-sans">
+                    {(['this', 'fiscal', 'custom'] as const).map(id => (
+                      <button
+                        key={id}
+                        onClick={() => handleRangeChange(id)}
+                        className={cn(
+                          "px-4 py-1.5 rounded-md text-[10px] font-bold uppercase transition-all border",
+                          historyRange === id
+                            ? "bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/20"
+                            : "bg-slate-900/40 border-slate-800/40 text-slate-300 hover:text-white"
+                        )}
+                      >
+                        {id === 'this'
+                          ? 'This month'
+                          : id === 'fiscal'
+                            ? 'Fiscal'
+                            : 'Custom'}
                       </button>
                     ))}
                   </div>
@@ -2486,15 +3026,71 @@ const pushToSheets = useCallback(async (action: 'update' | 'delete', transaction
                   />
                 </div>
               </div>
-              {historyRange === 'custom' && (
-                <div className="flex items-center justify-center sm:justify-start gap-1.5 px-1 animate-in fade-in slide-in-from-top-2 duration-300 w-full sm:w-auto">
-                  <button onClick={() => navigateCustomMonth(-1)} className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400"><ChevronLeft size={14} /></button>
-                  <input type="date" value={historyCustomDates.start} onChange={e => setHistoryCustomDates(p => ({ ...p, start: e.target.value }))} className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none focus:border-teal-400/50 flex-1 sm:flex-none" />
-                  <span className="text-slate-700 text-[10px] font-bold">–</span>
-                  <input type="date" value={historyCustomDates.end} onChange={e => setHistoryCustomDates(p => ({ ...p, end: e.target.value }))} className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none focus:border-teal-400/50 flex-1 sm:flex-none" />
-                  <button onClick={() => navigateCustomMonth(1)} className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400"><ChevronRight size={14} /></button>
-                </div>
-              )}
+
+              {/* Date Browsing Controls */}
+              <div className="flex items-center gap-1.5 px-1 animate-in fade-in duration-300">
+                <button
+                  onClick={() => {
+                    if (historyRange === 'this') {
+                      navigateHistoryThisMonth(-1);
+                    } else if (historyRange === 'fiscal') {
+                      setHistoryFiscalStartYear(prev => prev - 1);
+                    } else {
+                      navigateHistoryCustomMonth(-1);
+                    }
+                  }}
+                  className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                >
+                  <ChevronLeft size={14} />
+                </button>
+
+                {historyRange === 'custom' ? (
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="date"
+                      value={historyCustomDates.start}
+                      onChange={e => setHistoryCustomDates(prev => ({
+                        ...prev,
+                        start: e.target.value
+                      }))}
+                      className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none uppercase cursor-pointer"
+                    />
+                    <span className="text-slate-700 font-bold text-[10px]">–</span>
+                    <input
+                      type="date"
+                      value={historyCustomDates.end}
+                      onChange={e => setHistoryCustomDates(prev => ({
+                        ...prev,
+                        end: e.target.value
+                      }))}
+                      className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none uppercase cursor-pointer"
+                    />
+                  </div>
+                ) : historyRange === 'fiscal' ? (
+                  <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-[10px] font-bold text-white uppercase select-none tracking-wider whitespace-nowrap min-w-[160px] text-center">
+                    July {historyFiscalStartYear} - June {historyFiscalStartYear + 1}
+                  </div>
+                ) : (
+                  <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-[10px] font-bold text-teal-400 uppercase select-none tracking-wider whitespace-nowrap min-w-[120px] text-center">
+                    {formatHistoryThisMonthLabel(historyThisMonthDate)}
+                  </div>
+                )}
+
+                <button
+                  onClick={() => {
+                    if (historyRange === 'this') {
+                      navigateHistoryThisMonth(1);
+                    } else if (historyRange === 'fiscal') {
+                      setHistoryFiscalStartYear(prev => prev + 1);
+                    } else {
+                      navigateHistoryCustomMonth(1);
+                    }
+                  }}
+                  className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                >
+                  <ChevronRight size={14} />
+                </button>
+              </div>
             </div>
             <div className="hidden sm:block">
               <SettingsButton 
@@ -2575,8 +3171,8 @@ const pushToSheets = useCallback(async (action: 'update' | 'delete', transaction
                 <h3 className="text-heading font-bold text-white mb-4 tracking-tight font-display tabular-nums">{formatBDT(stats.totalInvestedRange)}</h3>
               </div>
               <div className="flex flex-col justify-center gap-0.5 pt-4 border-t border-slate-800 h-14">
-                <p className="text-label font-medium text-slate-300 uppercase">This Month</p>
-                <p className="text-body font-bold text-purple-400 tabular-nums">{formatBDT(stats.totalDepositsThisMonth)}</p>
+                <p className="text-label font-medium text-slate-300 uppercase">Withdrawal</p>
+                <p className="text-body font-bold text-purple-400 tabular-nums">{formatBDT(stats.totalWithdrawalsRange)}</p>
               </div>
             </Card>
 
@@ -2599,12 +3195,12 @@ const pushToSheets = useCallback(async (action: 'update' | 'delete', transaction
           {/* ── 6 Secondary Cards ── */}
           <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
             {[
-              { label: 'Investment', tooltip: 'Buying cost for investment purpose', value: stats.investmentHolding, color: 'text-blue-400' },
-              { label: 'Trading', tooltip: 'Buying cost for trading purpose', value: stats.tradingHolding, color: 'text-amber-400' },
-              { label: 'Stocks', tooltip: 'Buying cost for Stocks (Investment + Trading)', value: stats.investmentHolding + stats.tradingHolding, color: 'text-white' },
-              { label: 'Dividend', tooltip: 'Total dividend received', value: stats.dividendReceived, color: 'text-emerald-400' },
-              { label: 'Realized P&L', tooltip: 'Realized Profit or Loss from trading', value: stats.realizedPnL, color: stats.realizedPnL >= 0 ? 'text-emerald-400' : 'text-rose-500' },
-              { label: 'Withdrawal', tooltip: 'Money withdrawn from BO account', value: stats.totalWithdrawals, color: 'text-rose-400' },
+              { label: 'Cost Value of Stocks', tooltip: 'Calculated as Total Invested + Dividend - Withdrawal + Realized P&L - Cash Balance + Starting Cash Balance - Charge', value: stats.costValueOfStocks, color: 'text-white' },
+              { label: 'Investment', tooltip: 'Calculated as Investment Buy - Buy Cost of Sold Investment Shares during selected period', value: stats.investmentRange, color: 'text-blue-400' },
+              { label: 'Trading', tooltip: 'Calculated as Trading Buy - Buy Cost of Sold Trading Shares during selected period', value: stats.tradingRange, color: 'text-amber-400' },
+              { label: 'Dividend', tooltip: 'Dividend received during selected period', value: stats.dividendReceived, color: 'text-emerald-400' },
+              { label: 'Realized P&L', tooltip: 'Realized Profit or Loss from trading during selected period', value: stats.realizedPnL, color: stats.realizedPnL >= 0 ? 'text-emerald-400' : 'text-rose-500' },
+              { label: 'Charge', tooltip: 'Total charges incurred during selected period', value: stats.totalCharges, color: 'text-rose-400' },
             ].map(({ label, tooltip, value, color }) => (
               <Card key={label} className="bg-slate-900 border-slate-800 transition-all hover:border-teal-400/50 hover:shadow-[0_0_20px_rgba(45,212,191,0.1)]" style={{ padding: '12px' }}>
                 <div className="flex items-center justify-between mb-1">
@@ -2629,7 +3225,7 @@ const pushToSheets = useCallback(async (action: 'update' | 'delete', transaction
                 { label: 'Return',     value: stats.totalProfit,         color: stats.totalProfit >= 0 ? '#10b981' : '#f43f5e' },
                 { label: 'Trading',    value: stats.tradingHolding,      color: '#f59e0b' },
                 { label: 'Investment', value: stats.investmentHolding,   color: '#3b82f6' },
-                { label: 'Holding',    value: stats.stockCost,           color: '#a855f7' },
+                { label: 'Holding',    value: stats.currentHolding,      color: '#a855f7' },
                 { label: 'Deposit',    value: stats.totalInvestedRange,  color: '#06b6d4' }
               ];
               // Buffer maxVal by 15% to prevent bars/labels from overflowing
@@ -2834,68 +3430,154 @@ const fmtShort = (n: number) => {
             </div>
           </div>
 
-          {/* Table Time Filter Bar */}
-          <div className="flex items-center justify-between gap-3 bg-slate-900/50 border border-slate-800 rounded-xl p-2 mb-3">
-            <div className="relative flex-1 sm:hidden">
-              <button onClick={() => setIsTableTimeMenuOpen(!isTableTimeMenuOpen)}
-                className="flex items-center justify-between gap-2 bg-slate-950 border border-slate-800 rounded-lg px-3 h-9 text-[10px] font-bold text-slate-300 hover:text-white transition-all uppercase w-full">
-                <div className="flex items-center gap-1.5">
-                  <Calendar size={14} className="text-teal-400 shrink-0" />
-                  <span>{tableMode === '1m' ? 'Last 1M' : tableMode === '1y' ? 'Last 1Y' : 'Custom'}</span>
+          {/* Table Time Filter Bar — same UI and behavior as Mutual Funds & Summary */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/50 border border-slate-800 rounded-xl p-2 mb-3">
+            <div className="flex items-center justify-between w-full sm:w-auto gap-2">
+              <div className="relative flex-1 sm:flex-none">
+                {/* Mobile View: Dropdown */}
+                <div className="block sm:hidden">
+                  <button
+                    onClick={() => setIsTableTimeMenuOpen(!isTableTimeMenuOpen)}
+                    className="flex items-center justify-between gap-4 bg-slate-950 border border-slate-800 rounded-lg px-4 h-9 text-[10px] font-bold text-slate-300 hover:text-white transition-all uppercase w-full"
+                  >
+                    <div className="flex items-center gap-2">
+                      <Calendar size={14} className="text-teal-400" />
+                      {tableRange === 'this'
+                        ? 'This month'
+                        : tableRange === 'fiscal'
+                          ? 'Fiscal'
+                          : 'Custom'}
+                    </div>
+                    <ChevronDown
+                      size={14}
+                      className={cn(
+                        "text-slate-500 transition-transform",
+                        isTableTimeMenuOpen ? "rotate-180 text-teal-400" : ""
+                      )}
+                    />
+                  </button>
+
+                  {isTableTimeMenuOpen && (
+                    <>
+                      <div
+                        className="fixed inset-0 z-40"
+                        onClick={() => setIsTableTimeMenuOpen(false)}
+                      />
+                      <div className="absolute left-0 mt-2 w-full bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95">
+                        {(['this', 'fiscal', 'custom'] as const).map(id => (
+                          <button
+                            key={id}
+                            onClick={() => {
+                              handleTableRangeChange(id);
+                              setIsTableTimeMenuOpen(false);
+                            }}
+                            className={cn(
+                              "w-full text-left px-3 py-2 text-[10px] font-bold rounded-lg transition-colors uppercase",
+                              tableRange === id
+                                ? "bg-teal-400 text-slate-950"
+                                : "text-slate-300 hover:bg-slate-800"
+                            )}
+                          >
+                            {id === 'this'
+                              ? 'This month'
+                              : id === 'fiscal'
+                                ? 'Fiscal'
+                                : 'Custom'}
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  )}
                 </div>
-                <ChevronDown size={14} className={cn("text-slate-500 transition-transform", isTableTimeMenuOpen ? "rotate-180 text-teal-400" : "")} />
+
+                {/* Desktop View: Tabs */}
+                <div className="hidden sm:flex items-center bg-slate-950/50 rounded-lg p-1 border border-slate-800/50 gap-1 font-sans">
+                  {(['this', 'fiscal', 'custom'] as const).map(id => (
+                    <button
+                      key={id}
+                      onClick={() => handleTableRangeChange(id)}
+                      className={cn(
+                        "px-4 py-1.5 rounded-md text-[10px] font-bold uppercase transition-all border",
+                        tableRange === id
+                          ? "bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/20"
+                          : "bg-slate-900/40 border-slate-800/40 text-slate-300 hover:text-white"
+                      )}
+                    >
+                      {id === 'this'
+                        ? 'This month'
+                        : id === 'fiscal'
+                          ? 'Fiscal'
+                          : 'Custom'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Date Browsing Controls */}
+            <div className="flex items-center gap-1.5 px-1 animate-in fade-in duration-300">
+              <button
+                onClick={() => {
+                  if (tableRange === 'this') {
+                    navigateTableThisMonth(-1);
+                  } else if (tableRange === 'fiscal') {
+                    setTableFiscalStartYear(prev => prev - 1);
+                  } else {
+                    navigateTableCustomMonth(-1);
+                  }
+                }}
+                className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                <ChevronLeft size={14} />
               </button>
-              {isTableTimeMenuOpen && (
-                <>
-                  <div className="fixed inset-0 z-40" onClick={() => setIsTableTimeMenuOpen(false)} />
-                  <div className="absolute left-0 mt-2 w-full bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95">
-                    {[['1m', 'Last 1M'], ['1y', 'Last 1Y'], ['custom', 'Custom']].map(([id, label]) => (
-                      <button key={id} onClick={() => { setTableMode(id as any); setTableOffset(0); setIsTableTimeMenuOpen(false); }}
-                        className={cn("w-full text-left px-3 py-2 text-[10px] font-bold rounded-lg transition-colors uppercase",
-                          tableMode === id ? "bg-teal-400 text-slate-950" : "text-slate-300 hover:bg-slate-800")}>
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                </>
+
+              {tableRange === 'custom' ? (
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="date"
+                    value={tableCustomDates.start}
+                    onChange={e => setTableCustomDates(prev => ({
+                      ...prev,
+                      start: e.target.value
+                    }))}
+                    className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none uppercase cursor-pointer"
+                  />
+                  <span className="text-slate-700 font-bold text-[10px]">–</span>
+                  <input
+                    type="date"
+                    value={tableCustomDates.end}
+                    onChange={e => setTableCustomDates(prev => ({
+                      ...prev,
+                      end: e.target.value
+                    }))}
+                    className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none uppercase cursor-pointer"
+                  />
+                </div>
+              ) : tableRange === 'fiscal' ? (
+                <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-[10px] font-bold text-white uppercase select-none tracking-wider whitespace-nowrap min-w-[160px] text-center">
+                  July {tableFiscalStartYear} - June {tableFiscalStartYear + 1}
+                </div>
+              ) : (
+                <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-[10px] font-bold text-teal-400 uppercase select-none tracking-wider whitespace-nowrap min-w-[120px] text-center">
+                  {formatTableThisMonthLabel(tableThisMonthDate)}
+                </div>
               )}
+
+              <button
+                onClick={() => {
+                  if (tableRange === 'this') {
+                    navigateTableThisMonth(1);
+                  } else if (tableRange === 'fiscal') {
+                    setTableFiscalStartYear(prev => prev + 1);
+                  } else {
+                    navigateTableCustomMonth(1);
+                  }
+                }}
+                className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                <ChevronRight size={14} />
+              </button>
             </div>
-
-            <div className="hidden sm:flex items-center bg-slate-950/50 rounded-lg p-1 border border-slate-800/50 gap-1">
-              {[['1m', 'Last 1M'], ['1y', 'Last 1Y'], ['custom', 'Custom']].map(([id, label]) => (
-                <button key={id} onClick={() => { setTableMode(id as any); setTableOffset(0); }}
-                  className={cn("px-4 py-1.5 rounded-md text-[10px] font-bold uppercase transition-all whitespace-nowrap border",
-                    tableMode === id ? "bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/20 border-teal-400/30" : "bg-slate-900/40 border-slate-800/40 text-slate-300 hover:text-white hover:bg-slate-800/60")}>
-                  {label}
-                </button>
-              ))}
-            </div>
-
-            {(tableMode === '1m' || tableMode === '1y') && (
-              <div className="flex items-center gap-1 bg-slate-950/50 rounded-lg p-1 border border-slate-800/50 flex-1 sm:flex-none justify-between sm:justify-center max-w-[200px] sm:max-w-none">
-                <button onClick={() => setTableOffset(p => p + 1)}
-                  className="p-1 px-1.5 hover:bg-slate-800 rounded-md text-slate-400 hover:text-teal-400 transition-all shrink-0">
-                  <ChevronLeft size={16} />
-                </button>
-                <span className="text-[9px] sm:text-[10px] font-bold text-white uppercase tracking-wider whitespace-nowrap px-1">
-                  {tablePeriodLabel}
-                </span>
-                <button onClick={() => setTableOffset(p => Math.max(0, p - 1))} disabled={tableOffset === 0}
-                  className={cn("p-1.5 rounded-md transition-all", tableOffset === 0 ? "text-slate-700 cursor-not-allowed" : "hover:bg-slate-800 text-slate-400 hover:text-teal-400")}>
-                  <ChevronRight size={16} />
-                </button>
-              </div>
-            )}
-
-            {tableMode === 'custom' && (
-              <div className="flex items-center gap-2 animate-in fade-in slide-in-from-right-2 duration-300">
-                <input type="date" value={tableCustomDates.start} onChange={e => setTableCustomDates(p => ({ ...p, start: e.target.value }))}
-                  className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-[10px] font-bold text-white outline-none focus:border-teal-400/50" />
-                <span className="text-slate-600 text-[10px] font-bold uppercase">To</span>
-                <input type="date" value={tableCustomDates.end} onChange={e => setTableCustomDates(p => ({ ...p, end: e.target.value }))}
-                  className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-[10px] font-bold text-white outline-none focus:border-teal-400/50" />
-              </div>
-            )}
           </div>
 
           {/* ── The Table ── */}
@@ -2963,7 +3645,7 @@ const fmtShort = (n: number) => {
                       <div className={cn("flex items-center justify-center border-r border-b border-slate-800/50 transition-colors", isSelected ? "bg-teal-400/10" : "bg-slate-900/40 hover:bg-slate-800/40")}>
                         <Checkbox
                           checked={isSelected}
-                          onChange={() => toggleSelect(t.id)}
+                          onChange={(_, e) => toggleSelect(t.id, e)}
                         />
                       </div>
                       <div className={cellBase}>
@@ -3000,7 +3682,8 @@ const fmtShort = (n: number) => {
                             </span>
                             {t.commission > 0 && (
                               <span className="text-[10px] font-bold text-slate-500 tabular-nums">
-                                Comm {t.commission.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                {t.type === 'Dividend' ? 'TDS ' : 'Comm '}
+                                {t.commission.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                               </span>
                             )}
                           </>
@@ -3010,9 +3693,28 @@ const fmtShort = (n: number) => {
                       </div>
 
                       <div className={cellBase}>
-                        <span className={cn("text-body-sm font-bold tabular-nums", TYPE_TEXT[t.type] || 'text-white')}>
-                          {formatBDT(Math.abs(t.total))}
-                        </span>
+                        {t.type === 'Sell' ? (
+                          <>
+                            <span className="text-body-sm font-bold tabular-nums text-white">
+                              {formatBDT(Math.abs(t.total))}
+                            </span>
+                            {transactionPnLMap[t.id] !== undefined && (
+                              <span
+                                className={cn(
+                                  "text-[10px] font-bold tabular-nums block",
+                                  transactionPnLMap[t.id] >= 0 ? "text-emerald-400" : "text-rose-500"
+                                )}
+                              >
+                                {transactionPnLMap[t.id] >= 0 ? '+' : '-'}
+                                {formatBDT(Math.abs(transactionPnLMap[t.id]))}
+                              </span>
+                            )}
+                          </>
+                        ) : (
+                          <span className={cn("text-body-sm font-bold tabular-nums", TYPE_TEXT[t.type] || 'text-white')}>
+                            {formatBDT(Math.abs(t.total))}
+                          </span>
+                        )}
                       </div>
 
                       <div className={cn("flex items-center gap-1 px-3 py-3 border-b border-slate-800/50 transition-colors", isSelected ? "bg-teal-400/10" : "bg-slate-900/40 hover:bg-slate-800/40")}>
@@ -3147,35 +3849,60 @@ const fmtShort = (n: number) => {
                       Cumulative
                     </button>
                   </div>
-                  {/* Range Selector */}
-                  <div className="relative">
+                  {/* Range Selector with < and > */}
+                  <div className="flex items-center gap-1.5">
                     <button
-                      onClick={() => setIsAnalyticsRangeOpen(!isAnalyticsRangeOpen)}
-                      className="flex items-center gap-3 bg-slate-950 border border-slate-800 rounded-xl px-4 h-9 text-[10px] font-bold text-slate-300 hover:text-white transition-all uppercase tracking-widest"
+                      type="button"
+                      onClick={() => navigateAnalyticsDate(-1)}
+                      className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                      title="Previous period"
                     >
-                      <Calendar size={14} className="text-teal-400" />
-                      {analyticsRange === 'last6m' ? 'Last 6M' : analyticsRange === 'last12m' ? 'Last 12M' : analyticsRange === 'fiscal' ? 'Fiscal' : 'Custom'}
-                      <ChevronDown size={14} className={cn("transition-transform", isAnalyticsRangeOpen ? "rotate-180" : "")} />
+                      <ChevronLeft size={14} />
                     </button>
-                    {isAnalyticsRangeOpen && (
-                      <>
-                        <div className="fixed inset-0 z-40" onClick={() => setIsAnalyticsRangeOpen(false)} />
-                        <div className="absolute left-0 mt-2 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95">
-                          {['last6m', 'last12m', 'fiscal', 'custom'].map(id => (
-                            <button
-                              key={id}
-                              onClick={() => { setAnalyticsRange(id as any); setIsAnalyticsRangeOpen(false); }}
-                              className={cn(
-                                "w-full text-left px-3 py-2 text-[10px] font-bold rounded-lg transition-colors uppercase tracking-widest",
-                                analyticsRange === id ? "bg-teal-400 text-slate-950" : "text-slate-300 hover:bg-slate-800"
-                              )}
-                            >
-                              {id === 'last6m' ? 'Last 6M' : id === 'last12m' ? 'Last 12M' : id === 'fiscal' ? 'Fiscal' : 'Custom'}
-                            </button>
-                          ))}
-                        </div>
-                      </>
-                    )}
+
+                    <div className="relative">
+                      <button
+                        onClick={() => setIsAnalyticsRangeOpen(!isAnalyticsRangeOpen)}
+                        className="flex items-center gap-3 bg-slate-950 border border-slate-800 rounded-xl px-4 h-9 text-[10px] font-bold text-slate-300 hover:text-white transition-all uppercase tracking-widest"
+                      >
+                        <Calendar size={14} className="text-teal-400" />
+                        {analyticsRange === 'last6m' ? 'Last 6M' : analyticsRange === 'last12m' ? 'Last 12M' : analyticsRange === 'fiscal' ? 'Fiscal' : 'Custom'}
+                        <ChevronDown size={14} className={cn("transition-transform", isAnalyticsRangeOpen ? "rotate-180" : "")} />
+                      </button>
+                      {isAnalyticsRangeOpen && (
+                        <>
+                          <div className="fixed inset-0 z-40" onClick={() => setIsAnalyticsRangeOpen(false)} />
+                          <div className="absolute left-0 mt-2 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95">
+                            {['last6m', 'last12m', 'fiscal', 'custom'].map(id => (
+                              <button
+                                key={id}
+                                onClick={() => {
+                                  setAnalyticsRange(id as any);
+                                  setAnalyticsMonthOffset(0);
+                                  setAnalyticsFiscalOffset(0);
+                                  setIsAnalyticsRangeOpen(false);
+                                }}
+                                className={cn(
+                                  "w-full text-left px-3 py-2 text-[10px] font-bold rounded-lg transition-colors uppercase tracking-widest",
+                                  analyticsRange === id ? "bg-teal-400 text-slate-950" : "text-slate-300 hover:bg-slate-800"
+                                )}
+                              >
+                                {id === 'last6m' ? 'Last 6M' : id === 'last12m' ? 'Last 12M' : id === 'fiscal' ? 'Fiscal' : 'Custom'}
+                              </button>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => navigateAnalyticsDate(1)}
+                      className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                      title="Next period"
+                    >
+                      <ChevronRight size={14} />
+                    </button>
                   </div>
                   {analyticsRange === 'custom' && (
                     <div className="flex items-center gap-2 animate-in fade-in slide-in-from-left-2">
@@ -3456,34 +4183,59 @@ const fmtShort = (n: number) => {
                     </button>
                   </div>
 
-                    {/* Range selector */}
-                    <div className="relative">
+                    {/* Range selector with < and > */}
+                    <div className="flex items-center gap-1.5">
                       <button
-                        onClick={() => setIsReturnHistoryRangeOpen(!isReturnHistoryRangeOpen)}
-                        className="flex items-center gap-3 bg-slate-950 border border-slate-800 rounded-xl px-4 h-9 text-[10px] font-bold text-slate-300 hover:text-white transition-all uppercase tracking-widest"
+                        type="button"
+                        onClick={() => navigateReturnHistoryDate(-1)}
+                        className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                        title="Previous period"
                       >
-                        <Calendar size={14} className="text-teal-400" />
-                        {returnHistoryRange === 'last6m' ? 'Last 6M' : returnHistoryRange === 'last12m' ? 'Last 12M' : returnHistoryRange === 'fiscal' ? 'Fiscal' : 'Custom'}
-                        <ChevronDown size={14} className={cn('transition-transform', isReturnHistoryRangeOpen ? 'rotate-180' : '')} />
+                        <ChevronLeft size={14} />
                       </button>
-                      {isReturnHistoryRangeOpen && (
-                        <>
-                          <div className="fixed inset-0 z-40" onClick={() => setIsReturnHistoryRangeOpen(false)} />
-                          <div className="absolute left-0 mt-2 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95">
-                            {['last6m', 'last12m', 'fiscal', 'custom'].map(id => (
-                              <button key={id}
-                                onClick={() => { setReturnHistoryRange(id as any); setIsReturnHistoryRangeOpen(false); }}
-                                className={cn(
-                                  'w-full text-left px-3 py-2 text-[10px] font-bold rounded-lg transition-colors uppercase tracking-widest',
-                                  returnHistoryRange === id ? 'bg-teal-400 text-slate-950' : 'text-slate-300 hover:bg-slate-800'
-                                )}
-                              >
-                                {id === 'last6m' ? 'Last 6M' : id === 'last12m' ? 'Last 12M' : id === 'fiscal' ? 'Fiscal' : 'Custom'}
-                              </button>
-                            ))}
-                          </div>
-                        </>
-                      )}
+
+                      <div className="relative">
+                        <button
+                          onClick={() => setIsReturnHistoryRangeOpen(!isReturnHistoryRangeOpen)}
+                          className="flex items-center gap-3 bg-slate-950 border border-slate-800 rounded-xl px-4 h-9 text-[10px] font-bold text-slate-300 hover:text-white transition-all uppercase tracking-widest"
+                        >
+                          <Calendar size={14} className="text-teal-400" />
+                          {returnHistoryRange === 'last6m' ? 'Last 6M' : returnHistoryRange === 'last12m' ? 'Last 12M' : returnHistoryRange === 'fiscal' ? 'Fiscal' : 'Custom'}
+                          <ChevronDown size={14} className={cn('transition-transform', isReturnHistoryRangeOpen ? 'rotate-180' : '')} />
+                        </button>
+                        {isReturnHistoryRangeOpen && (
+                          <>
+                            <div className="fixed inset-0 z-40" onClick={() => setIsReturnHistoryRangeOpen(false)} />
+                            <div className="absolute left-0 mt-2 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95">
+                              {['last6m', 'last12m', 'fiscal', 'custom'].map(id => (
+                                <button key={id}
+                                  onClick={() => {
+                                    setReturnHistoryRange(id as any);
+                                    setReturnHistoryMonthOffset(0);
+                                    setReturnHistoryFiscalOffset(0);
+                                    setIsReturnHistoryRangeOpen(false);
+                                  }}
+                                  className={cn(
+                                    'w-full text-left px-3 py-2 text-[10px] font-bold rounded-lg transition-colors uppercase tracking-widest',
+                                    returnHistoryRange === id ? 'bg-teal-400 text-slate-950' : 'text-slate-300 hover:bg-slate-800'
+                                  )}
+                                >
+                                  {id === 'last6m' ? 'Last 6M' : id === 'last12m' ? 'Last 12M' : id === 'fiscal' ? 'Fiscal' : 'Custom'}
+                                </button>
+                              ))}
+                            </div>
+                          </>
+                        )}
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => navigateReturnHistoryDate(1)}
+                        className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                        title="Next period"
+                      >
+                        <ChevronRight size={14} />
+                      </button>
                     </div>
 
                     {/* Custom date inputs */}
@@ -4044,3 +4796,21 @@ const chartHeight = Math.max(200, stockChartData.length * (BAR_SIZE + BAR_GAP) +
     </div>
   );
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

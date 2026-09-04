@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Card, Button, Modal, Input, Checkbox, Select } from '../ui/BaseComponents';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { MutualFund, MutualFundTransaction, OnlineInvestmentStatus, InvestmentFrequency } from '../../types';
@@ -21,10 +21,12 @@ interface MutualFundsModuleProps {
   onReplaceAll?: (investments: Omit<MutualFund, 'id'>[]) => void;
   triggerAdd?: boolean;
   setTriggerAdd?: (val: boolean) => void;
-  inheritedData?: { date: string; amount: number } | null;
+  inheritedData?: { date: string; amount: number; description?: string; linkedTxId?: string; returnModule?: string; [key: string]: any } | null;
   onClearInheritedData?: () => void;
   onTitleChange?: (title: React.ReactNode) => void;
-  onNavigateToModule?: (module: string, initialAddData?: { date: string; amount: number; type?: 'Transfer' | 'Income' | 'Expense' | 'Loan'; targetModule?: string; description?: string }) => void;
+  onNavigateToModule?: (module: string, initialAddData?: any, openModal?: boolean) => void;
+  onDeleteLinkedTransfer?: (groupId: string) => void;
+  onUpdateLinkedTransfer?: (groupId: string, updates: { date: string; amount: number; description?: string }) => void;
 }
 
 // Tooltip component matching DSE Tracker style
@@ -169,9 +171,11 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
   inheritedData,
   onClearInheritedData,
   onTitleChange,
-  onNavigateToModule
+  onNavigateToModule,
+  onDeleteLinkedTransfer,
+  onUpdateLinkedTransfer
 }) => {
-  const uniqueInvestments = useMemo(() => {
+    const uniqueInvestments = useMemo(() => {
     const seen = new Set();
     return (investments || []).filter(inv => {
       if (!inv || !inv.id) return false;
@@ -180,6 +184,18 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
       return true;
     });
   }, [investments]);
+
+  const isFromExternalModuleRef = useRef(false);
+  const returnModuleRef = useRef<string | undefined>(undefined);
+  const [inheritedIeGroupId, setInheritedIeGroupId] = useState<string | undefined>(undefined);
+
+  const checkAndReturnToModule = () => {
+    if (returnModuleRef.current && onNavigateToModule) {
+      const ret = returnModuleRef.current;
+      returnModuleRef.current = undefined;
+      onNavigateToModule(ret, undefined, false);
+    }
+  };
 
   const [sortBy, setSortBy] = useState<'date' | 'amount' | 'amc' | 'fundName' | 'sipAmount' | 'units'>('date');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
@@ -200,99 +216,129 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
     title: string; 
     message: string; 
     onConfirm: () => void; 
-    variant?: 'danger' | 'warning' | 'info';
+    onCancel?: () => void;
+    variant?: 'danger' | 'warning' | 'info' | 'severe' | 'critical';
     confirmLabel?: string;
+    cancelLabel?: string;
+    details?: (string | null | undefined)[];
   } | null>(null);
 
   const closeConfirm = () => setConfirmState(prev => prev ? { ...prev, isOpen: false } : null);
-  const [historyRange, setHistoryRange] = useState<'all' | 'last12m' | 'fiscal' | 'custom'>('all');
+  // ─── Date Range Configuration (same range selector as Income & Expense) ───
+  // Mutual Funds intentionally opens on Custom by default.
+  const [historyRange, setHistoryRange] = useState<'this' | 'fiscal' | 'custom'>('custom');
   const [historyCustomDates, setHistoryCustomDates] = useState(() => {
-    const now = new Date();
     return {
-      start: getFirstOfMonth(now),
+      start: '2025-01-01',
       end: getTodayStr(),
     };
   });
-  const [customNavMonth, setCustomNavMonth] = useState<{ year: number; month: number }>(() => {
+  const [historyThisMonthDate, setHistoryThisMonthDate] = useState(() => {
     const now = new Date();
-    return { year: now.getFullYear(), month: now.getMonth() };
+    return new Date(now.getFullYear(), now.getMonth(), 1);
   });
-
-  const navigateCustomMonth = (direction: -1 | 1) => {
+  const [historyFiscalStartYear, setHistoryFiscalStartYear] = useState(() => {
     const now = new Date();
-    const newMonth = customNavMonth.month + direction;
-    let year = customNavMonth.year;
-    let month = newMonth;
-    if (month < 0) { month = 11; year -= 1; }
-    if (month > 11) { month = 0; year += 1; }
-    const navDate = new Date(year, month, 1);
-    const isCurrentMonth = year === now.getFullYear() && month === now.getMonth();
-    setCustomNavMonth({ year, month });
+    return now.getMonth() >= 6 ? now.getFullYear() : now.getFullYear() - 1;
+  });
+  const navigateHistoryCustomMonth = (offset: number) => {
+    const currentStart = new Date(historyCustomDates.start);
+    const nextMonth = new Date(currentStart.getFullYear(), currentStart.getMonth() + offset, 1);
+    const now = new Date();
+    const isCurrentMonth =
+      nextMonth.getFullYear() === now.getFullYear() &&
+      nextMonth.getMonth() === now.getMonth();
+
     setHistoryCustomDates({
-      start: getFirstOfMonth(navDate),
-      end: isCurrentMonth ? getTodayStr() : getLastOfMonth(navDate),
+      start: getFirstOfMonth(nextMonth),
+      end: isCurrentMonth ? getTodayStr() : getLastOfMonth(nextMonth),
     });
   };
 
-  const handleRangeChange = (newRange: 'all' | 'last12m' | 'fiscal' | 'custom') => {
+  const navigateHistoryThisMonth = (offset: number) => {
+    setHistoryThisMonthDate(prev => new Date(prev.getFullYear(), prev.getMonth() + offset, 1));
+  };
+
+  const handleRangeChange = (newRange: 'this' | 'fiscal' | 'custom') => {
     if (newRange === 'custom') {
-      const now = new Date();
-      const navMonth = { year: now.getFullYear(), month: now.getMonth() };
-      setCustomNavMonth(navMonth);
       setHistoryCustomDates({
-        start: getFirstOfMonth(now),
+        start: '2025-01-01',
         end: getTodayStr(),
       });
     }
     setHistoryRange(newRange);
   };
+
   const [isRangeMenuOpen, setIsRangeMenuOpen] = useState(false);
   const [isTimeMenuOpen, setIsTimeMenuOpen] = useState(false);
 
-  // Derive active date range for dashboard stats
+  // Helper used by the selector to display the selected month.
+  const formatHistoryThisMonthLabel = (d: Date) => {
+    const months = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    return `${months[d.getMonth()]} ${d.getFullYear()}`;
+  };
+
+  // Derive active date range for dashboard stats.
+  // This uses the same This Month / Fiscal / Custom semantics as Income & Expense.
   const rangeDates = useMemo(() => {
-    const now = new Date();
-    if (historyRange === 'all') {
-      return { start: new Date(0), end: now };
-    }
-    if (historyRange === 'last12m') {
-      const start = new Date(now.getFullYear(), now.getMonth() - 11, 1);
-      const end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
-      return { start, end };
-    }
-    if (historyRange === 'fiscal') {
-      const currentYear = now.getFullYear();
-      let startYear;
-      if (now.getMonth() >= 6) {
-        startYear = currentYear - 1;
-      } else {
-        startYear = currentYear - 2;
-      }
-      return { 
-        start: new Date(startYear, 6, 1), 
-        end: new Date(startYear + 1, 5, 30, 23, 59, 59, 999) 
+    if (historyRange === 'this') {
+      return {
+        start: new Date(
+          historyThisMonthDate.getFullYear(),
+          historyThisMonthDate.getMonth(),
+          1
+        ),
+        end: new Date(
+          historyThisMonthDate.getFullYear(),
+          historyThisMonthDate.getMonth() + 1,
+          0,
+          23, 59, 59, 999
+        )
       };
     }
-    const start = historyCustomDates.start ? new Date(historyCustomDates.start) : new Date(0);
-    const end = historyCustomDates.end ? new Date(historyCustomDates.end) : new Date();
+
+    if (historyRange === 'fiscal') {
+      return {
+        start: new Date(historyFiscalStartYear, 6, 1),
+        end: new Date(historyFiscalStartYear + 1, 5, 30, 23, 59, 59, 999)
+      };
+    }
+
+    const start = historyCustomDates.start
+      ? new Date(historyCustomDates.start)
+      : new Date(0);
+    const end = historyCustomDates.end
+      ? new Date(historyCustomDates.end)
+      : new Date();
+
+    start.setHours(0, 0, 0, 0);
     end.setHours(23, 59, 59, 999);
+
     return { start, end };
-  }, [historyRange, historyCustomDates]);
+  }, [
+    historyRange,
+    historyCustomDates,
+    historyThisMonthDate,
+    historyFiscalStartYear
+  ]);
 
   useEffect(() => {
     if (onTitleChange) {
-      if (historyRange === 'all') {
-        onTitleChange('Mutual Funds');
-      } else {
-        const { start, end } = rangeDates;
-        const startStr = start.toLocaleString('default', { month: 'short', year: 'numeric' });
-        const endStr = end.toLocaleString('default', { month: 'short', year: 'numeric' });
-        onTitleChange(
-          <span className="flex items-center gap-2">
-            MUTUAL FUNDS <span className="text-teal-400 font-display text-sm font-bold opacity-100 tracking-wider leading-none">/ {startStr} - {endStr}</span>
+      const { start, end } = rangeDates;
+      const startStr = start.toLocaleString('default', { month: 'short', year: 'numeric' });
+      const endStr = end.toLocaleString('default', { month: 'short', year: 'numeric' });
+
+      onTitleChange(
+        <span className="flex items-center gap-2">
+          MUTUAL FUNDS
+          <span className="text-teal-400 font-display text-sm font-bold opacity-100 tracking-wider leading-none">
+            / {startStr} - {endStr}
           </span>
-        );
-      }
+        </span>
+      );
     }
   }, [rangeDates, onTitleChange, historyRange]);
 
@@ -303,7 +349,10 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
 
   useEffect(() => {
     if (triggerAdd) {
-      setEditingTransaction(null);
+      const isExternalTrigger = !!inheritedData;
+      isFromExternalModuleRef.current = isExternalTrigger;
+      returnModuleRef.current = inheritedData?.returnModule;
+      setInheritedIeGroupId(isExternalTrigger ? inheritedData?.linkedTxId : undefined);
       const inheritedDate = inheritedData?.date || new Date().toISOString().split('T')[0];
       const inheritedAmt = (inheritedData?.amount !== undefined && inheritedData.amount !== null && inheritedData.amount !== 0) ? String(inheritedData.amount) : '0';
       const inheritedDesc = inheritedData?.description || '';
@@ -320,28 +369,96 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
         if (matched) matchedFundId = matched.id;
       }
 
-      const fundObj = uniqueInvestments.find(f => f.id === matchedFundId);
+      // Check if there is an existing linked transaction (by linkedTxId / linkedIeGroupId or matching fund/date)
+      let existingLinkedFund: MutualFund | undefined;
+      let existingLinkedTx: MutualFundTransaction | undefined;
 
-      setTransactionFormData({
-        fundId: matchedFundId,
-        sourceDate: inheritedDate,
-        sourceAmount: (inheritedAmt !== '0') ? inheritedAmt : (fundObj ? fundObj.sipAmount.toString() : '0'),
-        sourceUnits: '0',
-        sourceNav: '0',
-        actionDate: inheritedDate,
-        actionAmount: '0',
-        actionUnits: '0',
-        actionNav: '0',
-        date: inheritedDate,
-        sipAmount: (inheritedAmt !== '0') ? inheritedAmt : (fundObj ? fundObj.sipAmount.toString() : '0'),
-        pullingDate: inheritedDate,
-        units: '0',
-        nav: '0',
-        amount: inheritedAmt,
-        type: 'Buy'
-      });
-      setSourceMode('Deposit');
-      setActionMode('Buy');
+      if (inheritedData?.linkedTxId) {
+        for (const fund of uniqueInvestments) {
+          const t = fund.transactions.find(tx => tx.linkedIeGroupId === inheritedData.linkedTxId);
+          if (t) {
+            existingLinkedFund = fund;
+            existingLinkedTx = t;
+            break;
+          }
+        }
+      }
+
+      if (!existingLinkedTx && matchedFundId && inheritedData?.linkedTxId) {
+        const targetFund = uniqueInvestments.find(f => f.id === matchedFundId);
+        if (targetFund) {
+          const t = targetFund.transactions.find(tx => tx.linkedIeGroupId === inheritedData.linkedTxId || tx.date === inheritedDate);
+          if (t) {
+            existingLinkedFund = targetFund;
+            existingLinkedTx = t;
+          }
+        }
+      }
+
+      if (existingLinkedFund && existingLinkedTx) {
+        // Edit mode for existing investment: preserve Units, NAV, fund and only update with the new amount
+        setEditingTransaction({ fundId: existingLinkedFund.id, transaction: existingLinkedTx });
+        
+        let sMode: 'Deposit' | 'Dividend' | 'Surrender' = 'Deposit';
+        let aMode: 'Buy' | 'Withdrawal' = 'Buy';
+
+        if (existingLinkedTx.isWithdrawal) aMode = 'Withdrawal';
+        else if (existingLinkedTx.type === 'Sell') sMode = 'Surrender';
+        else if (existingLinkedTx.isDividend) sMode = 'Dividend';
+        else if ((existingLinkedTx.sipAmount || 0) > 0) sMode = 'Deposit';
+
+        setSourceMode(sMode);
+        setActionMode(aMode);
+
+        const newSipOrSourceAmt = (inheritedAmt !== '0') ? inheritedAmt : (existingLinkedTx.sipAmount?.toString() || '');
+
+        setTransactionFormData({
+          fundId: existingLinkedFund.id,
+          sourceDate: inheritedDate || existingLinkedTx.pullingDate || existingLinkedTx.date,
+          sourceAmount: newSipOrSourceAmt,
+          sourceUnits: existingLinkedTx.type === 'Sell' ? existingLinkedTx.units.toString() : '',
+          sourceNav: existingLinkedTx.type === 'Sell' ? existingLinkedTx.nav.toString() : '',
+          actionDate: inheritedDate || existingLinkedTx.date,
+          actionAmount: existingLinkedTx.isWithdrawal ? (inheritedAmt !== '0' ? inheritedAmt : existingLinkedTx.amount.toString()) : '',
+          actionUnits: (existingLinkedTx.type === 'Buy' || existingLinkedTx.type === 'Dividend') ? existingLinkedTx.units.toString() : '',
+          actionNav: (existingLinkedTx.type === 'Buy' || existingLinkedTx.type === 'Dividend') ? existingLinkedTx.nav.toString() : '',
+          date: inheritedDate || existingLinkedTx.date,
+          type: existingLinkedTx.type,
+          units: existingLinkedTx.units.toString(),
+          nav: existingLinkedTx.nav.toString(),
+          amount: existingLinkedTx.amount ? existingLinkedTx.amount.toString() : inheritedAmt,
+          sipAmount: newSipOrSourceAmt,
+          pullingDate: (existingLinkedTx.pullingDate || inheritedDate || '').toString()
+        });
+      } else {
+        // New investment creation
+        setEditingTransaction(null);
+        const fundObj = uniqueInvestments.find(f => f.id === matchedFundId);
+        const isWithdrawal = inheritedData?.targetModule === 'mutual-funds-withdrawal';
+        const isDividend = inheritedData?.targetModule === 'mutual-funds-dividend';
+
+        setTransactionFormData({
+          fundId: matchedFundId,
+          sourceDate: inheritedDate,
+          sourceAmount: (inheritedAmt !== '0') ? inheritedAmt : (fundObj ? fundObj.sipAmount.toString() : '0'),
+          sourceUnits: '0',
+          sourceNav: '0',
+          actionDate: inheritedDate,
+          actionAmount: isWithdrawal ? ((inheritedAmt !== '0') ? inheritedAmt : '0') : '0',
+          actionUnits: '0',
+          actionNav: '0',
+          date: inheritedDate,
+          sipAmount: (inheritedAmt !== '0') ? inheritedAmt : (fundObj ? fundObj.sipAmount.toString() : '0'),
+          pullingDate: inheritedDate,
+          units: '0',
+          nav: '0',
+          amount: inheritedAmt,
+          type: isDividend ? 'Dividend' : (isWithdrawal ? 'Withdrawal' : 'Buy')
+        });
+        setSourceMode(isDividend ? 'Dividend' : 'Deposit');
+        setActionMode(isWithdrawal ? 'Withdrawal' : 'Buy');
+      }
+
       setIsModalOpen(true);
       setTriggerAdd?.(false);
       onClearInheritedData?.();
@@ -865,6 +982,7 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
     
     setIsFundModalOpen(false);
     setEditingFund(null);
+    checkAndReturnToModule();
     setFundFormData({
       amc: '',
       fullName: '',
@@ -874,24 +992,29 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
     });
   };
 
-  const handleTransactionSubmit = (e: React.FormEvent) => {
+    const handleTransactionSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const fund = uniqueInvestments.find(f => f.id === transactionFormData.fundId);
     if (!fund) return;
 
     const newTransactions: MutualFundTransaction[] = [];
+    const isExternalCreate = !editingTransaction && isFromExternalModuleRef.current;
+    const linkGroupId: string | undefined = editingTransaction
+      ? (editingTransaction.transaction.linkedIeGroupId || inheritedIeGroupId)
+      : (isExternalCreate ? inheritedIeGroupId : crypto.randomUUID());
 
     if (sourceMode === 'Surrender') {
       const units = parseFloat(transactionFormData.sourceUnits) || 0;
       const nav = parseFloat(transactionFormData.sourceNav) || 0;
       if (units > 0) {
         newTransactions.push({
-          id: Math.random().toString(36).substr(2, 9),
+          id: editingTransaction ? editingTransaction.transaction.id : Math.random().toString(36).substr(2, 9),
           date: transactionFormData.sourceDate,
           type: 'Sell',
           units,
           nav,
           amount: units * nav,
+          linkedIeGroupId: linkGroupId,
         });
       }
     }
@@ -904,14 +1027,15 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
       if (units > 0 || sipAmount > 0) {
         newTransactions.push({
           id: editingTransaction ? editingTransaction.transaction.id : Math.random().toString(36).substr(2, 9),
-          date: transactionFormData.actionDate,
+          date: transactionFormData.actionDate || transactionFormData.sourceDate,
           type: sourceMode === 'Dividend' ? 'Dividend' : 'Buy',
           units,
           nav,
-          amount: units * nav,
+          amount: (units * nav > 0) ? (units * nav) : sipAmount,
           isDividend: sourceMode === 'Dividend',
           pullingDate: (sourceMode === 'Deposit' || sourceMode === 'Dividend') ? transactionFormData.sourceDate : undefined,
           sipAmount: (sourceMode === 'Deposit' || sourceMode === 'Dividend') ? sipAmount : undefined,
+          linkedIeGroupId: linkGroupId,
         });
       }
     } else if (actionMode === 'Withdrawal') {
@@ -925,10 +1049,11 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
           type: 'Withdrawal',
           units: 0,
           nav: 0,
-          amount: amount,
+          amount: amount > 0 ? amount : sipAmount,
           isWithdrawal: true,
           pullingDate: (sourceMode === 'Deposit' || sourceMode === 'Dividend') ? transactionFormData.sourceDate : undefined,
           sipAmount: (sourceMode === 'Deposit' || sourceMode === 'Dividend') ? sipAmount : undefined,
+          linkedIeGroupId: linkGroupId,
         });
       }
     }
@@ -936,39 +1061,97 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
     if (newTransactions.length === 0) return;
 
     if (editingTransaction) {
-      const updatedTransactions = fund.transactions.map(t => 
-        t.id === editingTransaction.transaction.id ? newTransactions[0] : t
-      );
-      onUpdate(fund.id, { transactions: updatedTransactions });
+      if (editingTransaction.fundId !== fund.id) {
+        const oldFund = investments.find(f => f.id === editingTransaction.fundId);
+        if (oldFund) {
+          onUpdate(oldFund.id, {
+            transactions: oldFund.transactions.filter(t => t.id !== editingTransaction.transaction.id)
+          });
+        }
+        onUpdate(fund.id, {
+          transactions: [...fund.transactions, newTransactions[0]]
+        });
+      } else {
+        const updatedTransactions = fund.transactions.map(t => 
+          t.id === editingTransaction.transaction.id ? newTransactions[0] : t
+        );
+        onUpdate(fund.id, { transactions: updatedTransactions });
+      }
       setEditingTransaction(null);
+
+      if (linkGroupId && onUpdateLinkedTransfer) {
+        const updatedAmt = (newTransactions[0].sipAmount && newTransactions[0].sipAmount > 0 && !newTransactions[0].isWithdrawal)
+          ? newTransactions[0].sipAmount
+          : newTransactions[0].amount;
+        onUpdateLinkedTransfer(linkGroupId, {
+          date: newTransactions[0].date,
+          amount: updatedAmt,
+          description: fund.fullName || fund.name || fund.amc
+        });
+      }
     } else {
       onUpdate(fund.id, {
         transactions: [...fund.transactions, ...newTransactions]
       });
 
-      if (onNavigateToModule && newTransactions.length > 0) {
+      if (isExternalCreate) {
+        isFromExternalModuleRef.current = false;
+        setInheritedIeGroupId(undefined);
+      } else if (onNavigateToModule && newTransactions.length > 0) {
         const trans = newTransactions[0];
         const pullingDateVal = transactionFormData.sourceDate || (trans.pullingDate ? (typeof trans.pullingDate === 'string' && trans.pullingDate.includes('-') ? trans.pullingDate : trans.date) : undefined);
         const txDate = pullingDateVal || trans.date || transactionFormData.actionDate || new Date().toISOString().split('T')[0];
-        const txAmount = (trans.amount && trans.amount > 0)
-          ? trans.amount
-          : (trans.sipAmount && trans.sipAmount > 0)
-            ? trans.sipAmount
-            : (parseFloat(transactionFormData.sourceAmount) || parseFloat(transactionFormData.actionAmount) || 0);
-        const fundNameOnly = fund.fullName || fund.name || fund.amc || 'Mutual Fund';
+        const fundShortName = fund.amc || fund.fullName || fund.name || 'Mutual Fund';
 
-        onNavigateToModule('income-expense', {
-          date: txDate,
-          amount: txAmount,
-          type: 'Transfer',
-          targetModule: 'mutual-funds',
-          description: fundNameOnly
-        });
+        if (actionMode === 'Withdrawal') {
+          const withdrawAmount = (trans.amount && trans.amount > 0)
+            ? trans.amount
+            : (parseFloat(transactionFormData.actionAmount) || 0);
+          onNavigateToModule('income-expense', {
+            date: transactionFormData.actionDate || txDate,
+            amount: withdrawAmount,
+            type: 'Transfer',
+            targetModule: 'mutual-funds-withdrawal',
+            description: `Withdraw: ${fundShortName}`,
+            linkedTxId: linkGroupId
+          });
+        } else if (sourceMode === 'Dividend') {
+          const dividendAmount = (trans.sipAmount && trans.sipAmount > 0)
+            ? trans.sipAmount
+            : (trans.amount && trans.amount > 0)
+              ? trans.amount
+              : (parseFloat(transactionFormData.sourceAmount) || 0);
+          onNavigateToModule('income-expense', {
+            date: transactionFormData.sourceDate || txDate,
+            amount: dividendAmount,
+            type: 'Income',
+            category: 'Finance Income',
+            subCategory: 'Dividend',
+            targetModule: 'mutual-funds-dividend',
+            description: `Dividend: ${fundShortName}`,
+            linkedTxId: linkGroupId
+          });
+        } else {
+          const depositAmount = (trans.sipAmount && trans.sipAmount > 0)
+            ? trans.sipAmount
+            : (trans.amount && trans.amount > 0)
+              ? trans.amount
+              : (parseFloat(transactionFormData.sourceAmount) || 0);
+          onNavigateToModule('income-expense', {
+            date: transactionFormData.sourceDate || txDate,
+            amount: depositAmount,
+            type: 'Transfer',
+            targetModule: 'mutual-funds',
+            description: `${fundShortName}`,
+            linkedTxId: linkGroupId
+          });
+        }
       }
     }
 
     setIsModalOpen(false);
     showNotification('success', editingTransaction ? 'Investment updated successfully!' : 'Investment(s) recorded successfully!');
+    checkAndReturnToModule();
   };
 
   const handleDeleteTransaction = (fundId: string, transactionId: string) => {
@@ -984,6 +1167,9 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
         closeConfirm();
         const updatedTransactions = fund.transactions.filter(t => t.id !== transactionId);
         onUpdate(fundId, { transactions: updatedTransactions });
+        if (trans?.linkedIeGroupId && onDeleteLinkedTransfer) {
+          onDeleteLinkedTransfer(trans.linkedIeGroupId);
+        }
         showNotification('success', 'Transaction deleted successfully!');
       },
       onCancel: closeConfirm
@@ -1006,13 +1192,23 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
           deletions[fundId].push(transactionId);
         });
 
+        const linkedGroupIdsToDelete: string[] = [];
         Object.entries(deletions).forEach(([fundId, transactionIds]) => {
           const fund = investments.find(f => f.id === fundId);
           if (fund) {
+            fund.transactions.forEach(t => {
+              if (transactionIds.includes(t.id) && t.linkedIeGroupId) {
+                linkedGroupIdsToDelete.push(t.linkedIeGroupId);
+              }
+            });
             const updatedTransactions = fund.transactions.filter(t => !transactionIds.includes(t.id));
             onUpdate(fundId, { transactions: updatedTransactions });
           }
         });
+
+        if (onDeleteLinkedTransfer) {
+          linkedGroupIdsToDelete.forEach(gid => onDeleteLinkedTransfer(gid));
+        }
 
         setSelectedIds([]);
         showNotification('success', `Successfully deleted ${selectedIds.length} transactions.`);
@@ -1021,15 +1217,32 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
     });
   };
 
+  const [lastSelectedId, setLastSelectedId] = useState<string | null>(null);
+
   const toggleSelectAll = () => {
     if (selectedIds.length === filtered.length && filtered.length > 0) {
       setSelectedIds([]);
+      setLastSelectedId(null);
     } else {
       setSelectedIds(filtered.map(t => t.uniqueId));
     }
   };
 
-  const toggleSelect = (id: string) => {
+  const toggleSelect = (id: string, e?: React.MouseEvent) => {
+    if (e?.shiftKey && lastSelectedId && lastSelectedId !== id) {
+      const lastIdx = filtered.findIndex(t => t.uniqueId === lastSelectedId);
+      const currIdx = filtered.findIndex(t => t.uniqueId === id);
+      if (lastIdx !== -1 && currIdx !== -1) {
+        const start = Math.min(lastIdx, currIdx);
+        const end = Math.max(lastIdx, currIdx);
+        const rangeIds = filtered.slice(start, end + 1).map(t => t.uniqueId);
+        setSelectedIds(prev => Array.from(new Set([...prev, ...rangeIds])));
+        setLastSelectedId(id);
+        return;
+      }
+    }
+
+    setLastSelectedId(id);
     if (selectedIds.includes(id)) {
       setSelectedIds(selectedIds.filter(i => i !== id));
     } else {
@@ -1054,11 +1267,11 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
     setTransactionFormData({
       fundId: t.fundId,
       sourceDate: t.pullingDate || t.date,
-      sourceAmount: (t.sipAmount || '').toString(),
+      sourceAmount: ((sMode === 'Dividend' ? (t.sipAmount || t.amount) : t.sipAmount) || '').toString(),
       sourceUnits: t.type === 'Sell' ? t.units.toString() : '',
       sourceNav: t.type === 'Sell' ? t.nav.toString() : '',
       actionDate: t.date,
-      actionAmount: t.isWithdrawal ? t.amount.toString() : '',
+      actionAmount: t.isWithdrawal ? (t.amount || t.sipAmount || '').toString() : '',
       actionUnits: t.type === 'Buy' || t.type === 'Dividend' ? t.units.toString() : '',
       actionNav: t.type === 'Buy' || t.type === 'Dividend' ? t.nav.toString() : '',
       date: t.date,
@@ -1075,49 +1288,61 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
   return (
     <div className="w-full">
       <div className="space-y-8">
-      {/* Date Range Selector */}
+      {/* Date Range Selector — same UI/behavior as Income & Expense */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/50 border border-slate-800 rounded-xl p-2 relative">
         <div className="flex flex-col sm:flex-row sm:items-center gap-3 w-full sm:w-auto">
-          {/* LINE 1 (Mobile): Range Selector + Settings Button */}
           <div className="flex items-center justify-between w-full sm:w-auto gap-2">
-            {/* Range Selection */}
             <div className="relative flex-1 sm:flex-none">
               {/* Mobile View: Dropdown */}
-              <div className="relative block sm:hidden">
-                <button 
+              <div className="block sm:hidden">
+                <button
                   onClick={() => setIsRangeMenuOpen(!isRangeMenuOpen)}
                   className="flex items-center justify-between gap-4 bg-slate-950 border border-slate-800 rounded-lg px-4 h-9 text-[10px] font-bold text-slate-300 hover:text-white transition-all uppercase w-full"
                 >
                   <div className="flex items-center gap-2">
                     <Calendar size={14} className="text-teal-400" />
-                    {historyRange === 'all' ? 'Overall' : 
-                     historyRange === 'last12m' ? 'Last 12M' : 
-                     historyRange === 'fiscal' ? 'Fiscal' : 'Custom'}
+                    {historyRange === 'this'
+                      ? 'This month'
+                      : historyRange === 'fiscal'
+                        ? 'Fiscal'
+                        : 'Custom'}
                   </div>
-                  <ChevronDown size={14} className={cn("text-slate-500 transition-transform duration-200", isRangeMenuOpen ? "rotate-180 text-teal-400" : "")} />
+                  <ChevronDown
+                    size={14}
+                    className={cn(
+                      "text-slate-500 transition-transform",
+                      isRangeMenuOpen ? "rotate-180 text-teal-400" : ""
+                    )}
+                  />
                 </button>
 
                 {isRangeMenuOpen && (
                   <>
-                    <div className="fixed inset-0 z-40" onClick={() => setIsRangeMenuOpen(false)} />
-                    <div className="absolute left-0 mt-2 w-full bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95 backdrop-blur-md divide-y divide-slate-800/30">
-                      {[
-                        { id: 'all', label: 'Overall' },
-                        { id: 'last12m', label: 'Last 12M' },
-                        { id: 'fiscal', label: 'Fiscal' },
-                        { id: 'custom', label: 'Custom' }
-                      ].map((opt) => (
-                        <div key={opt.id} className="py-0 first:pt-0 last:pb-0">
-                          <button 
-                            onClick={() => { setHistoryRange(opt.id as any); setIsRangeMenuOpen(false); }}
-                            className={cn(
-                              "w-full text-left px-3 py-1.5 text-[10px] font-bold rounded-lg transition-colors uppercase",
-                              historyRange === opt.id ? "bg-teal-400 text-slate-950" : "text-slate-300 hover:bg-slate-800 hover:text-white"
-                            )}
-                          >
-                            {opt.label}
-                          </button>
-                        </div>
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setIsRangeMenuOpen(false)}
+                    />
+                    <div className="absolute left-0 mt-2 w-full bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95">
+                      {(['this', 'fiscal', 'custom'] as const).map(id => (
+                        <button
+                          key={id}
+                          onClick={() => {
+                            handleRangeChange(id);
+                            setIsRangeMenuOpen(false);
+                          }}
+                          className={cn(
+                            "w-full text-left px-3 py-2 text-[10px] font-bold rounded-lg transition-colors uppercase",
+                            historyRange === id
+                              ? "bg-teal-400 text-slate-950"
+                              : "text-slate-300 hover:bg-slate-800"
+                          )}
+                        >
+                          {id === 'this'
+                            ? 'This month'
+                            : id === 'fiscal'
+                              ? 'Fiscal'
+                              : 'Custom'}
+                        </button>
                       ))}
                     </div>
                   </>
@@ -1125,19 +1350,23 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
               </div>
 
               {/* Desktop View: Tabs */}
-              <div className="hidden sm:flex items-center bg-slate-950/50 rounded-lg p-1 border border-slate-800/50 gap-1">
-                {['all', 'last12m', 'fiscal', 'custom'].map(id => (
+              <div className="hidden sm:flex items-center bg-slate-950/50 rounded-lg p-1 border border-slate-800/50 gap-1 font-sans">
+                {(['this', 'fiscal', 'custom'] as const).map(id => (
                   <button
                     key={id}
-                    onClick={() => setHistoryRange(id as any)}
+                    onClick={() => handleRangeChange(id)}
                     className={cn(
-                      "px-4 py-1.5 rounded-md text-[10px] font-bold uppercase transition-all whitespace-nowrap border",
-                      historyRange === id 
-                        ? "bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/20" 
-                        : "bg-slate-900/40 border-slate-800/40 text-slate-300 hover:text-white hover:bg-slate-800/60"
+                      "px-4 py-1.5 rounded-md text-[10px] font-bold uppercase transition-all border",
+                      historyRange === id
+                        ? "bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/20"
+                        : "bg-slate-900/40 border-slate-800/40 text-slate-300 hover:text-white"
                     )}
                   >
-                    {id === 'all' ? 'Overall' : id === 'last12m' ? 'Last 12M' : id === 'fiscal' ? 'Fiscal' : 'Custom'}
+                    {id === 'this'
+                      ? 'This month'
+                      : id === 'fiscal'
+                        ? 'Fiscal'
+                        : 'Custom'}
                   </button>
                 ))}
               </div>
@@ -1145,9 +1374,9 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
 
             {/* Settings Button - Mobile Only */}
             <div className="block sm:hidden">
-              <SettingsButton 
-                isOpen={isSettingsMenuOpen} 
-                setIsOpen={setIsSettingsMenuOpen} 
+              <SettingsButton
+                isOpen={isSettingsMenuOpen}
+                setIsOpen={setIsSettingsMenuOpen}
                 onExport={exportData}
                 onImport={importData}
                 onTemplate={() => {
@@ -1163,48 +1392,85 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
                   XLSX.utils.book_append_sheet(wb, ws, "Template");
                   XLSX.writeFile(wb, "Mutual_Fund_Import_Template.xlsx");
                 }}
-                onAdd={() => { setEditingFund(null); setIsFundModalOpen(true); }}
+                onAdd={() => {
+                  setEditingFund(null);
+                  setIsFundModalOpen(true);
+                }}
               />
             </div>
           </div>
 
-          {/* LINE 2 (Mobile): Custom Date Controls */}
-          {historyRange === 'custom' && (
-            <div className="flex items-center justify-center sm:justify-start gap-1.5 px-1 animate-in fade-in slide-in-from-top-2 sm:slide-in-from-left-2 duration-300 w-full sm:w-auto">
-              <button
-                onClick={() => navigateCustomMonth(-1)}
-                className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400"
-              >
-                <ChevronLeft size={14} />
-              </button>
-              <input
-                type="date"
-                className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none focus:border-teal-400/50 uppercase flex-1 sm:flex-none"
-                value={historyCustomDates.start}
-                onChange={(e) => setHistoryCustomDates(prev => ({ ...prev, start: e.target.value }))}
-              />
-              <span className="text-slate-700 text-[10px] font-bold">–</span>
-              <input
-                type="date"
-                className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none focus:border-teal-400/50 uppercase flex-1 sm:flex-none"
-                value={historyCustomDates.end}
-                onChange={(e) => setHistoryCustomDates(prev => ({ ...prev, end: e.target.value }))}
-              />
-              <button
-                onClick={() => navigateCustomMonth(1)}
-                className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400"
-              >
-                <ChevronRight size={14} />
-              </button>
-            </div>
-          )}
+          {/* Date Browsing Controls */}
+          <div className="flex items-center gap-1.5 px-1 animate-in fade-in duration-300">
+            <button
+              onClick={() => {
+                if (historyRange === 'this') {
+                  navigateHistoryThisMonth(-1);
+                } else if (historyRange === 'fiscal') {
+                  setHistoryFiscalStartYear(prev => prev - 1);
+                } else {
+                  navigateHistoryCustomMonth(-1);
+                }
+              }}
+              className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              <ChevronLeft size={14} />
+            </button>
+
+            {historyRange === 'custom' ? (
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="date"
+                  value={historyCustomDates.start}
+                  onChange={e => setHistoryCustomDates(prev => ({
+                    ...prev,
+                    start: e.target.value
+                  }))}
+                  className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none uppercase cursor-pointer"
+                />
+                <span className="text-slate-700 font-bold text-[10px]">–</span>
+                <input
+                  type="date"
+                  value={historyCustomDates.end}
+                  onChange={e => setHistoryCustomDates(prev => ({
+                    ...prev,
+                    end: e.target.value
+                  }))}
+                  className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none uppercase cursor-pointer"
+                />
+              </div>
+            ) : historyRange === 'fiscal' ? (
+              <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-[10px] font-bold text-white uppercase select-none tracking-wider whitespace-nowrap min-w-[160px] text-center">
+                July {historyFiscalStartYear} - June {historyFiscalStartYear + 1}
+              </div>
+            ) : (
+              <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-[10px] font-bold text-teal-400 uppercase select-none tracking-wider whitespace-nowrap min-w-[120px] text-center">
+                {formatHistoryThisMonthLabel(historyThisMonthDate)}
+              </div>
+            )}
+
+            <button
+              onClick={() => {
+                if (historyRange === 'this') {
+                  navigateHistoryThisMonth(1);
+                } else if (historyRange === 'fiscal') {
+                  setHistoryFiscalStartYear(prev => prev + 1);
+                } else {
+                  navigateHistoryCustomMonth(1);
+                }
+              }}
+              className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              <ChevronRight size={14} />
+            </button>
+          </div>
         </div>
 
         {/* Settings Button - Desktop Only */}
         <div className="hidden sm:block">
-          <SettingsButton 
-            isOpen={isSettingsMenuOpen} 
-            setIsOpen={setIsSettingsMenuOpen} 
+          <SettingsButton
+            isOpen={isSettingsMenuOpen}
+            setIsOpen={setIsSettingsMenuOpen}
             onExport={exportData}
             onImport={importData}
             onTemplate={() => {
@@ -1220,7 +1486,10 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
               XLSX.utils.book_append_sheet(wb, ws, "Template");
               XLSX.writeFile(wb, "Mutual_Fund_Import_Template.xlsx");
             }}
-            onAdd={() => { setEditingFund(null); setIsFundModalOpen(true); }}
+            onAdd={() => {
+              setEditingFund(null);
+              setIsFundModalOpen(true);
+            }}
           />
         </div>
       </div>
@@ -1408,14 +1677,22 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
                 </button>
                 <button 
                   onClick={() => {
+                    const txCount = fund.transactions?.length || 0;
                     setConfirmState({
                       isOpen: true,
-                      title: 'Confirm Delete',
-                      message: `Are you sure you want to delete ${fund.amc} mutual fund and all its transactions?`,
+                      title: 'Severe Warning: Deleting Main Mutual Fund & All Transactions',
+                      message: `You are about to delete the main Mutual Fund "${fund.fullName || fund.amc}". This will permanently delete the fund and ALL ${txCount} dependent buy, sell, SIP, and dividend transactions as well as historical performance records.`,
+                      variant: 'severe',
+                      confirmLabel: 'Delete Fund & All Transactions',
+                      details: [
+                        `Main Mutual Fund: "${fund.fullName || fund.amc}" (${fund.amc})`,
+                        `${txCount} Dependent Buy / Sell / SIP Transactions`,
+                        'All NAV, units, holding valuation, and return records for this fund'
+                      ],
                       onConfirm: () => {
                         closeConfirm();
                         onDelete(fund.id);
-                        showNotification('success', 'Mutual Fund deleted successfully!');
+                        showNotification('success', 'Mutual Fund and all transactions deleted successfully!');
                       },
                       onCancel: closeConfirm
                     });
@@ -1782,7 +2059,7 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
                   <div className={cn("flex items-center justify-center border-r border-b border-slate-800/50 transition-colors group-hover:bg-slate-800/40", isSelected ? "bg-teal-400/10" : "bg-slate-900/40")}>
                     <Checkbox 
                       checked={isSelected}
-                      onChange={() => toggleSelect(t.uniqueId)}
+                      onChange={(_, e) => toggleSelect(t.uniqueId, e)}
                     />
                   </div>
                   
@@ -1857,8 +2134,9 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
         onClose={() => {
           setIsFundModalOpen(false);
           setEditingFund(null);
+          checkAndReturnToModule();
         }} 
-        title={editingFund ? "Edit Mutual Fund" : "Add New Mutual Fund"}
+        title={editingFund ? "Edit Mutual Fund" : "Add Mutual Fund"}
       >
         <form onSubmit={handleFundSubmit} className="space-y-4">
           <div className="grid grid-cols-2 gap-3">
@@ -1907,6 +2185,7 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
             <Button type="button" variant="secondary" className="flex-1 py-2" onClick={() => {
               setIsFundModalOpen(false);
               setEditingFund(null);
+              checkAndReturnToModule();
             }}>
               Cancel
             </Button>
@@ -1917,11 +2196,11 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
         </form>
       </Modal>
 
-      {/* New Investment Modal */}
+      {/* New / Edit Investment Modal */}
       <Modal 
         isOpen={isModalOpen} 
-        onClose={() => setIsModalOpen(false)} 
-        title="Add New Investment"
+        onClose={() => { setIsModalOpen(false); setEditingTransaction(null); isFromExternalModuleRef.current = false; setInheritedIeGroupId(undefined); checkAndReturnToModule(); }} 
+        title={editingTransaction ? "Edit Investment" : "Add Investment"}
       >
         <form onSubmit={handleTransactionSubmit} className="space-y-4">
           <Select 
@@ -1945,11 +2224,6 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
                    sourceAmount: (prev.sourceAmount && prev.sourceAmount !== '0') ? prev.sourceAmount : (sourceMode === 'Deposit' ? fund.sipAmount.toString() : '0'),
                    sourceDate: prev.sourceDate || defaultDate,
                    actionDate: prev.actionDate || defaultDate,
-                   sourceUnits: '0',
-                   sourceNav: '0',
-                   actionAmount: '0',
-                   actionUnits: '0',
-                   actionNav: '0',
                    sipAmount: (prev.sipAmount && prev.sipAmount !== '0') ? prev.sipAmount : fund.sipAmount.toString(),
                    pullingDate: prev.pullingDate || defaultDate,
                    date: prev.date || defaultDate
@@ -2108,11 +2382,11 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
           </div>
 
           <div className="pt-2 flex gap-3">
-            <Button type="button" variant="secondary" className="flex-1 py-2" onClick={() => setIsModalOpen(false)}>
+            <Button type="button" variant="secondary" className="flex-1 py-2" onClick={() => { setIsModalOpen(false); setEditingTransaction(null); isFromExternalModuleRef.current = false; setInheritedIeGroupId(undefined); checkAndReturnToModule(); }}>
               Cancel
             </Button>
             <Button type="submit" className="flex-1 py-2">
-              Record Investment
+              {editingTransaction ? "Update Investment" : "Record Investment"}
             </Button>
           </div>
         </form>

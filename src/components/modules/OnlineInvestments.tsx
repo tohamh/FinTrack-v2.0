@@ -13,6 +13,7 @@ import { Plus, MoreVertical, Calendar, TrendingUp, Search, Globe, Building2, Clo
 
 interface OnlineInvestmentsProps {
   investments: OnlineInvestment[];
+  conversionRates?: { USD_to_BDT: number; LYD_to_BDT: number };
   onAdd: (investment: Omit<OnlineInvestment, 'id'>) => void;
   onUpdate: (id: string, updates: Partial<OnlineInvestment>) => void;
   onDelete: (id: string) => void;
@@ -21,14 +22,19 @@ interface OnlineInvestmentsProps {
   onReplaceAll?: (investments: Omit<OnlineInvestment, 'id'>[]) => void;
   triggerAdd?: boolean;
   setTriggerAdd?: (val: boolean) => void;
-  inheritedData?: { date: string; amount: number } | null;
+  inheritedData?: { date: string; amount: number; linkedTxId?: string; description?: string; returnModule?: string; [key: string]: any } | null;
   onClearInheritedData?: () => void;
   onTitleChange?: (title: React.ReactNode) => void;
-  onNavigateToModule?: (module: string, initialAddData?: { date: string; amount: number; type?: 'Transfer' | 'Income' | 'Expense' | 'Loan'; targetModule?: string; description?: string }) => void;
+  onNavigateToModule?: (module: string, initialAddData?: any, openModal?: boolean) => void;
+  onDeleteLinkedTransfer?: (groupId: string) => void;
+  onUpdateLinkedTransfer?: (groupId: string, updates: { date: string; amount: number; description?: string }) => void;
+  onDeleteLinkedIncomeTx?: (txId: string) => void;
+  onUpdateLinkedIncomeTx?: (txId: string, updates: { date: string; amount: number; description?: string }) => void;
 }
 
 export const OnlineInvestments: React.FC<OnlineInvestmentsProps> = ({ 
   investments, 
+  conversionRates,
   onAdd, 
   onUpdate,
   onDelete,
@@ -40,8 +46,14 @@ export const OnlineInvestments: React.FC<OnlineInvestmentsProps> = ({
   inheritedData,
   onClearInheritedData,
   onTitleChange,
-  onNavigateToModule
+  onNavigateToModule,
+  onDeleteLinkedTransfer,
+  onUpdateLinkedTransfer,
+  onDeleteLinkedIncomeTx,
+  onUpdateLinkedIncomeTx
 }) => {
+  const usdRate = conversionRates?.USD_to_BDT ?? 120;
+  const lydRate = conversionRates?.LYD_to_BDT ?? 20;
   const [selectedProfiles, setSelectedProfiles] = useState<OnlineInvestmentStatus[]>(['Active', 'Delayed']);
   const [sortBy, setSortBy] = useState<'date' | 'amount' | 'roi' | 'platform'>('date');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
@@ -61,11 +73,26 @@ export const OnlineInvestments: React.FC<OnlineInvestmentsProps> = ({
     title: string; 
     message: string; 
     onConfirm: () => void; 
-    variant?: 'danger' | 'warning' | 'info';
+    onCancel?: () => void;
+    variant?: 'danger' | 'warning' | 'info' | 'severe' | 'critical';
     confirmLabel?: string;
+    cancelLabel?: string;
+    details?: (string | null | undefined)[];
   } | null>(null);
 
   const closeConfirm = () => setConfirmState(prev => prev ? { ...prev, isOpen: false } : null);
+
+  const isFromExternalModuleRef = React.useRef(false);
+  const returnModuleRef = React.useRef<string | undefined>(undefined);
+  const [inheritedIeGroupId, setInheritedIeGroupId] = useState<string | undefined>(undefined);
+
+  const checkAndReturnToModule = () => {
+    if (returnModuleRef.current && onNavigateToModule) {
+      const ret = returnModuleRef.current;
+      returnModuleRef.current = undefined;
+      onNavigateToModule(ret, undefined, false);
+    }
+  };
   const [customPlatforms, setCustomPlatforms] = useState<string[]>(() => {
     const saved = localStorage.getItem('fintrack_custom_platforms');
     return saved ? JSON.parse(saved) : [];
@@ -79,48 +106,105 @@ export const OnlineInvestments: React.FC<OnlineInvestmentsProps> = ({
   const [insightSearch, setInsightSearch] = useState('');
   const [selectedInsightCompany, setSelectedInsightCompany] = useState<string | null>(null);
   const [isInsightSearchOpen, setIsInsightSearchOpen] = useState(false);
-  const [historyRange, setHistoryRange] = useState<'all' | 'last12m' | 'fiscal' | 'custom'>('all');
+
+  // ─── Date Range Configuration (same range selector as Mutual Funds) ───
+  const [historyRange, setHistoryRange] = useState<'this' | 'fiscal' | 'custom'>('custom');
   const [historyCustomDates, setHistoryCustomDates] = useState(() => {
-    const now = new Date();
     return {
-      start: getFirstOfMonth(now),
+      start: '2025-01-01',
       end: getTodayStr(),
     };
   });
-  const [customNavMonth, setCustomNavMonth] = useState<{ year: number; month: number }>(() => {
+  const [historyThisMonthDate, setHistoryThisMonthDate] = useState(() => {
     const now = new Date();
-    return { year: now.getFullYear(), month: now.getMonth() };
+    return new Date(now.getFullYear(), now.getMonth(), 1);
   });
-
-  const navigateCustomMonth = (direction: -1 | 1) => {
+  const [historyFiscalStartYear, setHistoryFiscalStartYear] = useState(() => {
     const now = new Date();
-    const newMonth = customNavMonth.month + direction;
-    let year = customNavMonth.year;
-    let month = newMonth;
-    if (month < 0) { month = 11; year -= 1; }
-    if (month > 11) { month = 0; year += 1; }
-    const navDate = new Date(year, month, 1);
-    const isCurrentMonth = year === now.getFullYear() && month === now.getMonth();
-    setCustomNavMonth({ year, month });
+    return now.getMonth() >= 6 ? now.getFullYear() : now.getFullYear() - 1;
+  });
+  const navigateHistoryCustomMonth = (offset: number) => {
+    const currentStart = new Date(historyCustomDates.start);
+    const nextMonth = new Date(currentStart.getFullYear(), currentStart.getMonth() + offset, 1);
+    const now = new Date();
+    const isCurrentMonth =
+      nextMonth.getFullYear() === now.getFullYear() &&
+      nextMonth.getMonth() === now.getMonth();
+
     setHistoryCustomDates({
-      start: getFirstOfMonth(navDate),
-      end: isCurrentMonth ? getTodayStr() : getLastOfMonth(navDate),
+      start: getFirstOfMonth(nextMonth),
+      end: isCurrentMonth ? getTodayStr() : getLastOfMonth(nextMonth),
     });
   };
 
-  const handleRangeChange = (newRange: 'all' | 'last12m' | 'fiscal' | 'custom') => {
+  const navigateHistoryThisMonth = (offset: number) => {
+    setHistoryThisMonthDate(prev => new Date(prev.getFullYear(), prev.getMonth() + offset, 1));
+  };
+
+  const handleRangeChange = (newRange: 'this' | 'fiscal' | 'custom') => {
     if (newRange === 'custom') {
-      const now = new Date();
-      const navMonth = { year: now.getFullYear(), month: now.getMonth() };
-      setCustomNavMonth(navMonth);
       setHistoryCustomDates({
-        start: getFirstOfMonth(now),
+        start: '2025-01-01',
         end: getTodayStr(),
       });
     }
     setHistoryRange(newRange);
   };
-  const [isHistoryMenuOpen, setIsHistoryMenuOpen] = useState(false);
+
+  const [isRangeMenuOpen, setIsRangeMenuOpen] = useState(false);
+  const [isTimeMenuOpen, setIsTimeMenuOpen] = useState(false);
+
+  // Helper used by the selector to display the selected month.
+  const formatHistoryThisMonthLabel = (d: Date) => {
+    const months = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    return `${months[d.getMonth()]} ${d.getFullYear()}`;
+  };
+
+  // Derive active date range for dashboard stats.
+  const rangeDates = useMemo(() => {
+    if (historyRange === 'this') {
+      return {
+        start: new Date(
+          historyThisMonthDate.getFullYear(),
+          historyThisMonthDate.getMonth(),
+          1
+        ),
+        end: new Date(
+          historyThisMonthDate.getFullYear(),
+          historyThisMonthDate.getMonth() + 1,
+          0,
+          23, 59, 59, 999
+        )
+      };
+    }
+
+    if (historyRange === 'fiscal') {
+      return {
+        start: new Date(historyFiscalStartYear, 6, 1),
+        end: new Date(historyFiscalStartYear + 1, 5, 30, 23, 59, 59, 999)
+      };
+    }
+
+    const start = historyCustomDates.start
+      ? new Date(historyCustomDates.start)
+      : new Date(0);
+    const end = historyCustomDates.end
+      ? new Date(historyCustomDates.end)
+      : new Date();
+
+    start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
+
+    return { start, end };
+  }, [
+    historyRange,
+    historyCustomDates,
+    historyThisMonthDate,
+    historyFiscalStartYear
+  ]);
   
   const [formData, setFormData] = useState({
     platform: 'Biniyog',
@@ -134,7 +218,7 @@ export const OnlineInvestments: React.FC<OnlineInvestmentsProps> = ({
     actualProfit: '' as string | number,
     hasRepaymentSchedule: false,
     confirmNegativeProfit: false,
-    manualInstallments: [] as { date: string; amount: string }[],
+    manualInstallments: [] as { date: string; amount: string; type?: 'Repayment' | 'Interest' }[],
   });
 
   // Calculate duration in months rounded to nearest 0.5
@@ -149,31 +233,61 @@ export const OnlineInvestments: React.FC<OnlineInvestmentsProps> = ({
     return Math.max(0.1, Math.round(months * 10) / 10);
   }, [formData.investmentDate, formData.maturityDate]);
 
-  // Handle external trigger for adding
+  // Handle external trigger for adding or editing
   React.useEffect(() => {
     if (triggerAdd) {
-      setEditingId(null);
+      const isExternalTrigger = !!inheritedData;
+      isFromExternalModuleRef.current = isExternalTrigger;
+      returnModuleRef.current = inheritedData?.returnModule;
+      setInheritedIeGroupId(isExternalTrigger ? inheritedData?.linkedTxId : undefined);
+
       const inheritedDate = inheritedData?.date || new Date().toISOString().split('T')[0];
       const inheritedAmt = (inheritedData?.amount !== undefined && inheritedData.amount !== null && inheritedData.amount !== 0) ? String(inheritedData.amount) : '';
-      setFormData({
-        platform: 'Biniyog',
-        companyName: '',
-        projectName: '',
-        amount: inheritedAmt,
-        estimatedReturn: '',
-        investmentDate: inheritedDate,
-        maturityDate: '',
-        status: 'Active' as OnlineInvestmentStatus,
-        actualProfit: '' as string | number,
-        hasRepaymentSchedule: false,
-        confirmNegativeProfit: false,
-        manualInstallments: [] as { date: string; amount: string }[],
-      });
+
+      // Check if there is an existing linked online investment (by linkedTxId)
+      let existingLinkedInv: OnlineInvestment | undefined;
+      if (inheritedData?.linkedTxId) {
+        existingLinkedInv = investments.find(inv => inv.linkedIeGroupId === inheritedData.linkedTxId);
+      }
+
+      if (existingLinkedInv) {
+        setEditingId(existingLinkedInv.id);
+        setFormData({
+          platform: existingLinkedInv.platform,
+          companyName: existingLinkedInv.companyName || '',
+          projectName: existingLinkedInv.projectName,
+          amount: (inheritedAmt && inheritedAmt !== '0') ? inheritedAmt : (existingLinkedInv.amount !== undefined ? existingLinkedInv.amount.toString() : ''),
+          estimatedReturn: existingLinkedInv.estimatedReturn?.toString() || '',
+          investmentDate: inheritedDate || existingLinkedInv.investmentDate,
+          maturityDate: existingLinkedInv.maturityDate || '',
+          status: existingLinkedInv.status || 'Active',
+          actualProfit: existingLinkedInv.actualProfit?.toString() || '',
+          hasRepaymentSchedule: existingLinkedInv.hasRepaymentSchedule || false,
+          confirmNegativeProfit: (existingLinkedInv.estimatedReturn || 0) < existingLinkedInv.amount,
+          manualInstallments: (existingLinkedInv.installments || []).map(i => ({ date: i.date, amount: i.amount.toString(), type: i.type || 'Repayment' })),
+        });
+      } else {
+        setEditingId(null);
+        setFormData({
+          platform: 'Biniyog',
+          companyName: '',
+          projectName: '',
+          amount: inheritedAmt,
+          estimatedReturn: '',
+          investmentDate: inheritedDate,
+          maturityDate: '',
+          status: 'Active' as OnlineInvestmentStatus,
+          actualProfit: '' as string | number,
+          hasRepaymentSchedule: false,
+          confirmNegativeProfit: false,
+          manualInstallments: [] as { date: string; amount: string; type?: 'Repayment' | 'Interest' }[],
+        });
+      }
       setIsModalOpen(true);
       setTriggerAdd?.(false);
       onClearInheritedData?.();
     }
-  }, [triggerAdd, setTriggerAdd, inheritedData, onClearInheritedData]);
+  }, [triggerAdd, setTriggerAdd, inheritedData, onClearInheritedData, investments]);
 
   const getEffectiveStatus = (inv: OnlineInvestment): OnlineInvestmentStatus => {
     const today = new Date().toISOString().split('T')[0];
@@ -316,32 +430,21 @@ export const OnlineInvestments: React.FC<OnlineInvestmentsProps> = ({
   }, [investments]);
 
   const historyStats = useMemo(() => {
-    let startDate: Date;
-    let endDate = new Date();
     const now = new Date();
-
-    if (historyRange === 'all') {
-      startDate = new Date(0);
-      endDate = new Date(3000, 11, 31, 23, 59, 59, 999);
-    } else if (historyRange === 'last12m') {
-      startDate = new Date(now.getFullYear(), now.getMonth() - 11, 1);
-      endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
-    } else if (historyRange === 'fiscal') {
-      const currentYear = now.getFullYear();
-      const startYear = now.getMonth() >= 6 ? currentYear - 1 : currentYear - 2;
-      startDate = new Date(startYear, 6, 1);
-      endDate = new Date(startYear + 1, 5, 30, 23, 59, 59, 999);
-    } else {
-      startDate = historyCustomDates.start ? new Date(historyCustomDates.start) : new Date(0);
-      endDate = historyCustomDates.end ? new Date(historyCustomDates.end) : new Date();
-      endDate.setHours(23, 59, 59, 999);
-    }
+    const startDate = rangeDates.start;
+    const endDate = rangeDates.end;
 
     const startStr = startDate.toISOString().split('T')[0];
     const endStr = endDate.toISOString().split('T')[0];
 
+    const getRate = (currency?: string) => {
+      if (currency === 'USD') return usdRate;
+      if (currency === 'LYD') return lydRate;
+      return 1;
+    };
+
     const periodInvestments = investments.filter(inv => inv.investmentDate >= startStr && inv.investmentDate <= endStr);
-    const totalInvested = periodInvestments.reduce((sum, inv) => sum + inv.amount, 0);
+    const totalInvested = periodInvestments.reduce((sum, inv) => sum + inv.amount * getRate(inv.currency), 0);
 
     const activeInvestments = investments.filter(inv => {
       const status = getEffectiveStatus(inv);
@@ -353,17 +456,40 @@ export const OnlineInvestments: React.FC<OnlineInvestmentsProps> = ({
       }
       return true;
     });
-    const activeInvestmentAmount = activeInvestments.reduce((sum, inv) => sum + inv.amount, 0);
+    const activeInvestmentAmount = activeInvestments.reduce((sum, inv) => sum + inv.amount * getRate(inv.currency), 0);
     const activeInvestmentCount = activeInvestments.length;
 
+    // Sum of returned installments (excluding interests) for active investments
+    const sumReturnedInstallments = activeInvestments.reduce((sum, inv) => {
+      const rate = getRate(inv.currency);
+      if (inv.installments && inv.installments.length > 0) {
+        const invReturned = inv.installments.reduce((instSum, inst) => {
+          const payDate = inst.actualDate || inst.date;
+          if (inst.isPaid && payDate <= endStr && (inst.type || 'Repayment') !== 'Interest') {
+            return instSum + ((inst.actualAmount !== undefined ? inst.actualAmount : inst.amount) * rate);
+          }
+          return instSum;
+        }, 0);
+        return sum + invReturned;
+      } else {
+        if (inv.totalRepaid > 0) {
+          return sum + (Math.min(inv.amount, inv.totalRepaid) * rate);
+        }
+        return sum;
+      }
+    }, 0);
+
+    const currentHolding = Math.max(0, activeInvestmentAmount - sumReturnedInstallments);
+
     const projectedProfit = activeInvestments.reduce((sum, i) => {
-  const profit = i.estimatedReturn 
-    ? (i.estimatedReturn - i.amount) 
-    : (i.amount * i.expectedROE * (i.durationMonths / 12) / 100);
-  return sum + profit;
-}, 0);
+      const rate = getRate(i.currency);
+      const profit = i.estimatedReturn 
+        ? (i.estimatedReturn - i.amount) 
+        : (i.amount * i.expectedROE * (i.durationMonths / 12) / 100);
+      return sum + (profit * rate);
+    }, 0);
     const avgProjectedROI = activeInvestmentAmount > 0 
-      ? activeInvestments.reduce((sum, i) => sum + (i.expectedROE * i.amount), 0) / activeInvestmentAmount 
+      ? activeInvestments.reduce((sum, i) => sum + (i.expectedROE * i.amount * getRate(i.currency)), 0) / activeInvestmentAmount 
       : 0;
 
     const completedInPeriod = investments.filter(inv => {
@@ -373,54 +499,56 @@ export const OnlineInvestments: React.FC<OnlineInvestmentsProps> = ({
       return completionDate >= startStr && completionDate <= endStr;
     });
     const totalProfitReceived = completedInPeriod.reduce((sum, inv) => {
-      const rate = inv.currency === 'USD' ? 110 : 1;
+      const rate = getRate(inv.currency);
       const profit = inv.actualProfit !== undefined ? inv.actualProfit : (inv.totalRepaid - inv.amount);
       return sum + (profit * rate);
     }, 0);
-    const completedPrincipal = completedInPeriod.reduce((sum, i) => sum + i.amount, 0);
+    const completedPrincipal = completedInPeriod.reduce((sum, i) => sum + i.amount * getRate(i.currency), 0);
     const avgRealizedROI = completedPrincipal > 0
       ? completedInPeriod.reduce((sum, i) => {
           const actualROE = i.totalRepaid > 0 ? ((i.totalRepaid - i.amount) / i.amount) * (12 / i.durationMonths) * 100 : 0;
-          return sum + (actualROE * i.amount);
+          return sum + (actualROE * i.amount * getRate(i.currency));
         }, 0) / completedPrincipal
       : 0;
 
     const currentYearInvested = investments
       .filter(i => new Date(i.investmentDate).getFullYear() === now.getFullYear())
-      .reduce((sum, i) => sum + i.amount, 0);
+      .reduce((sum, i) => sum + i.amount * getRate(i.currency), 0);
 
     return { 
-  invested: totalInvested, 
-  active: activeInvestmentAmount,
-  activeInvestment: activeInvestmentAmount,  // alias: for Online Invests, activeInvestment === Current Holding at all times
-  activeCount: activeInvestmentCount,
-  projectedProfit,
-  avgProjectedROI,
-  profit: totalProfitReceived, 
-  avgRealizedROI,
-  currentYearInvested,
-  startStr, 
-  endStr 
-};
-  }, [investments, historyRange, historyCustomDates]);
+      invested: totalInvested, 
+      active: currentHolding,
+      currentHolding,
+      activeInvestment: activeInvestmentAmount,
+      activeInvestmentAmount,
+      activeCount: activeInvestmentCount,
+      sumReturnedInstallments,
+      projectedProfit,
+      avgProjectedROI,
+      profit: totalProfitReceived, 
+      avgRealizedROI,
+      currentYearInvested,
+      startStr, 
+      endStr 
+    };
+  }, [investments, rangeDates, usdRate, lydRate]);
 
   React.useEffect(() => {
     if (onTitleChange) {
-      if (historyRange === 'all') {
-        onTitleChange('Online Invests');
-      } else {
-        const start = new Date(historyStats.startStr);
-        const end = new Date(historyStats.endStr);
-        const startStr = start.toLocaleString('default', { month: 'short', year: 'numeric' });
-        const endStr = end.toLocaleString('default', { month: 'short', year: 'numeric' });
-        onTitleChange(
-          <span className="flex items-center gap-2">
-            ONLINE INVESTS <span className="text-teal-400 font-display text-sm font-bold opacity-100 tracking-wider leading-none">/ {startStr} - {endStr}</span>
+      const { start, end } = rangeDates;
+      const startStr = start.toLocaleString('default', { month: 'short', year: 'numeric' });
+      const endStr = end.toLocaleString('default', { month: 'short', year: 'numeric' });
+
+      onTitleChange(
+        <span className="flex items-center gap-2">
+          ONLINE INVESTS
+          <span className="text-teal-400 font-display text-sm font-bold opacity-100 tracking-wider leading-none">
+            / {startStr} - {endStr}
           </span>
-        );
-      }
+        </span>
+      );
     }
-  }, [historyStats, onTitleChange, historyRange]);
+  }, [rangeDates, onTitleChange, historyRange]);
 
   const showNotification = (type: 'success' | 'error', message: string) => {
     setNotification({ type, message });
@@ -468,6 +596,7 @@ export const OnlineInvestments: React.FC<OnlineInvestmentsProps> = ({
         rows.push({
           ...baseData,
           'Installment No': i + 1,
+          'Installment Type': inst.type || 'Repayment',
           'Scheduled Date': inst.date,
           'Scheduled Amount': inst.amount,
           'Actual Paid Date': inst.isPaid ? (inst.actualDate || inst.date) : '',
@@ -480,7 +609,7 @@ export const OnlineInvestments: React.FC<OnlineInvestmentsProps> = ({
     const headers = [
       'Investment ID', 'Platform', 'Company', 'Project', 'Invested Amount', 
       'Estimated Return', 'ROI (%)', 'Investment Date', 'Maturity Date', 
-      'Duration (Months)', 'Investment Status', 'Installment No', 
+      'Duration (Months)', 'Investment Status', 'Installment No', 'Installment Type',
       'Scheduled Date', 'Scheduled Amount', 'Actual Paid Date', 
       'Actual Paid Amount', 'Payment Status'
     ];
@@ -569,10 +698,12 @@ export const OnlineInvestments: React.FC<OnlineInvestmentsProps> = ({
                 const actualAmount = parseFloat(row['Actual Paid Amount'] || row['actualAmount'] || '0');
                 const paymentStatus = row['Payment Status'] || '';
                 const isPaid = paymentStatus === 'Paid' || paymentStatus === 'Partial' || !!actualDate;
+                const instType = (row['Installment Type'] || row['Type'] || 'Repayment') === 'Interest' ? 'Interest' : 'Repayment';
 
                 return {
                   date: scheduledDate,
                   amount: scheduledAmount || estimatedReturn,
+                  type: instType as 'Repayment' | 'Interest',
                   isPaid,
                   actualDate: actualDate || undefined,
                   actualAmount: actualAmount || undefined,
@@ -633,28 +764,78 @@ export const OnlineInvestments: React.FC<OnlineInvestmentsProps> = ({
     if (!inv) return;
 
     const newInstallments = [...inv.installments];
-    const isPaid = !newInstallments[index].isPaid;
-    
-    newInstallments[index] = { 
-      ...newInstallments[index], 
-      isPaid,
-      actualDate: isPaid ? (newInstallments[index].actualDate || newInstallments[index].date) : undefined,
-      actualAmount: isPaid ? (newInstallments[index].actualAmount || newInstallments[index].amount) : undefined,
-      isAutoMarked: isPaid,
-      isManuallyEdited: false
-    };
-    
-    const totalRepaid = newInstallments.reduce((sum, inst) => inst.isPaid ? sum + (inst.actualAmount || inst.amount) : sum, 0);
-    
-    // Calculate new status
-    const tempInv = { ...inv, installments: newInstallments, totalRepaid };
-    const newStatus = getEffectiveStatus(tempInv);
-    
-    onUpdate(invId, { 
-      installments: newInstallments,
-      totalRepaid,
-      status: newStatus
-    });
+    const currentlyPaid = !!newInstallments[index].isPaid;
+
+    if (!currentlyPaid) {
+      const actualDate = newInstallments[index].actualDate || newInstallments[index].date || getTodayStr();
+      const actualAmount = newInstallments[index].actualAmount !== undefined && newInstallments[index].actualAmount !== null
+        ? newInstallments[index].actualAmount
+        : newInstallments[index].amount;
+      const linkedIncomeTxId = newInstallments[index].linkedIncomeTxId || crypto.randomUUID();
+
+      newInstallments[index] = { 
+        ...newInstallments[index], 
+        isPaid: true,
+        actualDate,
+        actualAmount,
+        linkedIncomeTxId,
+        isAutoMarked: false,
+        isManuallyEdited: true
+      };
+      
+      const totalRepaid = newInstallments.reduce((sum, inst) => inst.isPaid ? sum + (inst.actualAmount !== undefined ? inst.actualAmount : inst.amount) : sum, 0);
+      const tempInv = { ...inv, installments: newInstallments, totalRepaid };
+      const newStatus = getEffectiveStatus(tempInv);
+      
+      onUpdate(invId, { 
+        installments: newInstallments,
+        totalRepaid,
+        status: newStatus
+      });
+
+      const isInterest = (newInstallments[index].type || 'Repayment') === 'Interest';
+      const narration = isInterest
+        ? `Investment Interest: ${inv.platform}, ${inv.projectName}`
+        : `Received Invested Money: ${inv.platform}, ${inv.projectName}`;
+
+      if (onNavigateToModule) {
+        onNavigateToModule('income-expense', {
+          date: actualDate,
+          amount: actualAmount,
+          type: isInterest ? 'Income' : 'Transfer',
+          category: isInterest ? 'Other Income' : undefined,
+          subCategory: isInterest ? 'Investment Interest' : undefined,
+          description: narration,
+          linkedTxId: linkedIncomeTxId,
+          targetModule: isInterest ? 'online-interest' : 'online-return'
+        });
+      }
+    } else {
+      const prevLinkedTxId = newInstallments[index].linkedIncomeTxId;
+      newInstallments[index] = { 
+        ...newInstallments[index], 
+        isPaid: false,
+        actualDate: undefined,
+        actualAmount: undefined,
+        linkedIncomeTxId: undefined,
+        isAutoMarked: false,
+        isManuallyEdited: false
+      };
+      
+      const totalRepaid = newInstallments.reduce((sum, inst) => inst.isPaid ? sum + (inst.actualAmount !== undefined ? inst.actualAmount : inst.amount) : sum, 0);
+      const tempInv = { ...inv, installments: newInstallments, totalRepaid };
+      const newStatus = getEffectiveStatus(tempInv);
+      
+      onUpdate(invId, { 
+        installments: newInstallments,
+        totalRepaid,
+        status: newStatus
+      });
+
+      if (prevLinkedTxId && onDeleteLinkedIncomeTx) {
+        onDeleteLinkedIncomeTx(prevLinkedTxId);
+      }
+    }
   };
 
   const handleSaveCustomRepayment = (invId: string, index: number) => {
@@ -667,6 +848,7 @@ export const OnlineInvestments: React.FC<OnlineInvestmentsProps> = ({
 
     if (index === -1) {
       // No schedule case
+      const linkedIncomeTxId = inv.installments[0]?.linkedIncomeTxId || crypto.randomUUID();
       onUpdate(invId, { 
         totalRepaid: actualAmount,
         actualMaturityDate: actualDate,
@@ -674,27 +856,39 @@ export const OnlineInvestments: React.FC<OnlineInvestmentsProps> = ({
         installments: [{
           date: inv.maturityDate,
           amount: expectedTotal,
+          type: 'Repayment',
           isPaid: actualAmount >= expectedTotal * 0.99,
           actualDate,
           actualAmount,
           isAutoMarked: false,
-          isManuallyEdited: true
+          isManuallyEdited: true,
+          linkedIncomeTxId
         }]
       });
+
+      const narration = `Received Invested Money: ${inv.platform}, ${inv.projectName}`;
+
+      if (onUpdateLinkedIncomeTx && linkedIncomeTxId) {
+        onUpdateLinkedIncomeTx(linkedIncomeTxId, {
+          date: actualDate,
+          amount: actualAmount,
+          description: narration
+        });
+      }
     } else {
+      const linkedIncomeTxId = inv.installments[index]?.linkedIncomeTxId || crypto.randomUUID();
       const newInstallments = [...inv.installments];
       newInstallments[index] = { 
         ...newInstallments[index], 
         isPaid: true,
         actualDate,
         actualAmount,
+        linkedIncomeTxId,
         isAutoMarked: false,
         isManuallyEdited: true
       };
       
-      const totalRepaid = newInstallments.reduce((sum, inst) => inst.isPaid ? sum + (inst.actualAmount || inst.amount) : sum, 0);
-      
-      // Calculate new status
+      const totalRepaid = newInstallments.reduce((sum, inst) => inst.isPaid ? sum + (inst.actualAmount !== undefined ? inst.actualAmount : inst.amount) : sum, 0);
       const tempInv = { ...inv, installments: newInstallments, totalRepaid };
       const newStatus = getEffectiveStatus(tempInv);
       
@@ -703,6 +897,19 @@ export const OnlineInvestments: React.FC<OnlineInvestmentsProps> = ({
         totalRepaid,
         status: newStatus
       });
+
+      const isInterest = (newInstallments[index].type || 'Repayment') === 'Interest';
+      const narration = isInterest
+        ? `Investment Interest: ${inv.platform}, ${inv.projectName}`
+        : `Received Invested Money: ${inv.platform}, ${inv.projectName}`;
+
+      if (onUpdateLinkedIncomeTx && linkedIncomeTxId) {
+        onUpdateLinkedIncomeTx(linkedIncomeTxId, {
+          date: actualDate,
+          amount: actualAmount,
+          description: narration
+        });
+      }
     }
     setCustomRepaymentIdx(null);
   };
@@ -736,7 +943,7 @@ export const OnlineInvestments: React.FC<OnlineInvestmentsProps> = ({
     }
   };
 
-  const handleUpdateInstallmentValue = (invId: string, index: number, field: 'date' | 'amount', value: string) => {
+  const handleUpdateInstallmentValue = (invId: string, index: number, field: 'date' | 'amount' | 'type', value: string) => {
     const inv = investments.find(i => i.id === invId);
     if (!inv) return;
 
@@ -759,6 +966,11 @@ export const OnlineInvestments: React.FC<OnlineInvestmentsProps> = ({
 
   const handleEdit = (inv: OnlineInvestment) => {
     setEditingId(inv.id);
+    const hasRepay = inv.hasRepaymentSchedule ?? (!inv.isDefaultSchedule && (inv.installments?.length || 0) > 0);
+    const manualInsts = (inv.installments && inv.installments.length > 0)
+      ? inv.installments.map(i => ({ date: i.date || '', amount: i.amount !== undefined ? i.amount.toString() : '', type: i.type || 'Repayment' }))
+      : (inv.maturityDate ? [{ date: inv.maturityDate, amount: (inv.estimatedReturn || (inv.amount + (inv.amount * inv.expectedROE * (inv.durationMonths / 12) / 100))).toString(), type: 'Repayment' as const }] : []);
+
     setFormData({
       platform: inv.platform,
       companyName: inv.companyName || '',
@@ -769,64 +981,127 @@ export const OnlineInvestments: React.FC<OnlineInvestmentsProps> = ({
       maturityDate: inv.maturityDate,
       status: inv.status,
       actualProfit: inv.actualProfit?.toString() || '',
-      hasRepaymentSchedule: inv.hasRepaymentSchedule || false,
+      hasRepaymentSchedule: hasRepay,
       confirmNegativeProfit: (inv.estimatedReturn || 0) < inv.amount,
-      manualInstallments: (inv.installments || []).map(i => ({ date: i.date, amount: i.amount.toString() })),
+      manualInstallments: manualInsts,
     });
     setIsModalOpen(true);
     setActiveMenuId(null);
   };
 
-const handleDelete = (id: string) => {
+  const handleDelete = (id: string) => {
     const inv = investments.find(i => i.id === id);
     if (!inv) return;
 
+    const instCount = inv.installments?.length || 0;
+    const paidCount = inv.installments?.filter(i => i.isPaid).length || 0;
+    const hasDependents = instCount > 0 || !!inv.linkedIeGroupId;
+
     setConfirmState({
       isOpen: true,
-      title: 'Confirm Delete',
-      message: `Are you sure you want to delete the investment in "${inv.projectName}"?`,
+      title: hasDependents ? 'Severe Warning: Deleting Main Investment & All Dependents' : 'Confirm Delete',
+      message: hasDependents
+        ? `You are about to delete the main Online Investment in "${inv.projectName}". This will permanently delete the investment record and ALL ${instCount} dependent repayment installments (${paidCount} received), historical profit records, and linked ledger entries.`
+        : `Are you sure you want to delete the investment in "${inv.projectName}"?`,
+      variant: hasDependents ? 'severe' : 'danger',
+      confirmLabel: hasDependents ? 'Delete Investment & All Dependents' : 'Delete',
+      details: hasDependents ? [
+        `Main Online Investment Record: "${inv.projectName}" (${inv.platform || 'Online'})`,
+        `${instCount} Scheduled / Received Repayment Installments (${paidCount} completed payouts)`,
+        inv.linkedIeGroupId ? 'Linked initial investment transfer in Income & Expense ledger' : null,
+        inv.installments?.some(i => i.linkedIncomeTxId) ? 'Linked profit / return income transactions in Income & Expense ledger' : null
+      ] : undefined,
       onConfirm: () => {
         closeConfirm();
         onDelete(id);
+        if (inv.linkedIeGroupId && onDeleteLinkedTransfer) {
+          onDeleteLinkedTransfer(inv.linkedIeGroupId);
+        }
+        inv.installments?.forEach(inst => {
+          if (inst.linkedIncomeTxId && onDeleteLinkedIncomeTx) {
+            onDeleteLinkedIncomeTx(inst.linkedIncomeTxId);
+          }
+        });
         setActiveMenuId(null);
-        showNotification('success', 'Investment deleted successfully');
+        showNotification('success', 'Investment and all dependent entries deleted successfully');
       },
       onCancel: closeConfirm,
     });
   };
 
-const handleBatchDelete = () => {
+  const handleBatchDelete = () => {
     if (selectedIds.length === 0) return;
+
+    const selectedInvs = investments.filter(i => selectedIds.includes(i.id));
+    const totalInstallments = selectedInvs.reduce((acc, i) => acc + (i.installments?.length || 0), 0);
+    const totalPaid = selectedInvs.reduce((acc, i) => acc + (i.installments?.filter(inst => inst.isPaid).length || 0), 0);
+    const hasDependents = totalInstallments > 0 || selectedInvs.some(i => i.linkedIeGroupId);
 
     setConfirmState({
       isOpen: true,
-      title: 'Confirm Batch Delete',
-      message: `Are you sure you want to delete ${selectedIds.length} selected online investments?`,
+      title: hasDependents ? 'Severe Warning: Batch Deleting Main Investments & All Dependents' : 'Confirm Batch Delete',
+      message: hasDependents
+        ? `Your selection contains ${selectedIds.length} main Online Investment(s). Deleting will permanently delete all selected investments and ALL ${totalInstallments} dependent repayment installments (${totalPaid} received), returns, and linked ledger entries.`
+        : `Are you sure you want to delete ${selectedIds.length} selected online investments?`,
+      variant: hasDependents ? 'severe' : 'danger',
+      confirmLabel: hasDependents ? `Delete All (${selectedIds.length} Items & Dependents)` : 'Delete Selected',
+      details: hasDependents ? [
+        `${selectedIds.length} Main Online Investment Entries (${selectedInvs.map(i => i.projectName).slice(0, 3).join(', ')}${selectedInvs.length > 3 ? '...' : ''})`,
+        `${totalInstallments} Dependent Repayment Installment Records (${totalPaid} completed payouts)`,
+        'All associated linked transfers and return income entries in Income & Expense ledger'
+      ] : undefined,
       onConfirm: () => {
         closeConfirm();
+        investments.filter(i => selectedIds.includes(i.id)).forEach(i => {
+          if (i.linkedIeGroupId && onDeleteLinkedTransfer) {
+            onDeleteLinkedTransfer(i.linkedIeGroupId);
+          }
+          i.installments?.forEach(inst => {
+            if (inst.linkedIncomeTxId && onDeleteLinkedIncomeTx) {
+              onDeleteLinkedIncomeTx(inst.linkedIncomeTxId);
+            }
+          });
+        });
         onBatchDelete(selectedIds);
         setSelectedIds([]);
-        showNotification('success', `Successfully deleted ${selectedIds.length} investments.`);
+        showNotification('success', `Successfully deleted ${selectedIds.length} investments and all dependent entries.`);
       },
       onCancel: closeConfirm,
     });
   };
 
-  const toggleSelectAll = () => {
-  if (selectedIds.length === filtered.length && filtered.length > 0) {
-    setSelectedIds([]);
-  } else {
-    setSelectedIds(filtered.map(i => i.id));
-  }
-};
+  const [lastSelectedId, setLastSelectedId] = useState<string | null>(null);
 
-const toggleSelect = (id: string) => {
-  if (selectedIds.includes(id)) {
-    setSelectedIds(selectedIds.filter(i => i !== id));
-  } else {
-    setSelectedIds([...selectedIds, id]);
-  }
-};
+  const toggleSelectAll = () => {
+    if (selectedIds.length === filtered.length && filtered.length > 0) {
+      setSelectedIds([]);
+      setLastSelectedId(null);
+    } else {
+      setSelectedIds(filtered.map(i => i.id));
+    }
+  };
+
+  const toggleSelect = (id: string, e?: React.MouseEvent) => {
+    if (e?.shiftKey && lastSelectedId && lastSelectedId !== id) {
+      const lastIdx = filtered.findIndex(i => i.id === lastSelectedId);
+      const currIdx = filtered.findIndex(i => i.id === id);
+      if (lastIdx !== -1 && currIdx !== -1) {
+        const start = Math.min(lastIdx, currIdx);
+        const end = Math.max(lastIdx, currIdx);
+        const rangeIds = filtered.slice(start, end + 1).map(i => i.id);
+        setSelectedIds(prev => Array.from(new Set([...prev, ...rangeIds])));
+        setLastSelectedId(id);
+        return;
+      }
+    }
+
+    setLastSelectedId(id);
+    if (selectedIds.includes(id)) {
+      setSelectedIds(selectedIds.filter(i => i !== id));
+    } else {
+      setSelectedIds([...selectedIds, id]);
+    }
+  };
 
   const handleAddPlatform = () => {
     if (!newPlatformName.trim()) return;
@@ -868,26 +1143,88 @@ const toggleSelect = (id: string) => {
       return;
     }
 
+    if (formData.hasRepaymentSchedule && formData.manualInstallments.length > 0) {
+      for (let i = 0; i < formData.manualInstallments.length; i++) {
+        const inst = formData.manualInstallments[i];
+        if (!inst.date) {
+          setFormError(`Please enter a date for installment #${i + 1}`);
+          return;
+        }
+        const instAmt = parseFloat(inst.amount);
+        if (isNaN(instAmt) || instAmt <= 0) {
+          setFormError(`Please enter a valid amount for installment #${i + 1}`);
+          return;
+        }
+      }
+    }
+
     const roe = amount > 0 ? (profit / amount) * (12 / duration) * 100 : 0;
 
-    let installments = [];
+    const isExternalCreate = !editingId && isFromExternalModuleRef.current;
+    const existingInv = editingId ? investments.find(i => i.id === editingId) : null;
+    const linkGroupId: string | undefined = editingId
+      ? (existingInv?.linkedIeGroupId || inheritedIeGroupId)
+      : (isExternalCreate ? inheritedIeGroupId : crypto.randomUUID());
+
+    let finalInstallments: any[] = [];
     let isDefaultSchedule = false;
 
     if (formData.hasRepaymentSchedule && formData.manualInstallments.length > 0) {
-      installments = formData.manualInstallments.map(inst => ({
-        date: inst.date,
-        amount: parseFloat(inst.amount) || 0,
-        isPaid: false
-      }));
+      isDefaultSchedule = false;
+      finalInstallments = formData.manualInstallments.map((inst, idx) => {
+        const existingInst = existingInv?.installments?.[idx];
+        const instAmount = parseFloat(inst.amount) || 0;
+        return {
+          date: inst.date,
+          amount: instAmount,
+          type: (inst.type || 'Repayment') as 'Repayment' | 'Interest',
+          isPaid: existingInst?.isPaid || false,
+          actualDate: existingInst?.actualDate,
+          actualAmount: existingInst?.actualAmount,
+          isAutoMarked: existingInst?.isAutoMarked,
+          isManuallyEdited: existingInst?.isManuallyEdited,
+          linkedIncomeTxId: existingInst?.linkedIncomeTxId
+        };
+      });
+
+      // If existing installments were removed, clean up their linked income transactions
+      if (existingInv?.installments && existingInv.installments.length > formData.manualInstallments.length) {
+        existingInv.installments.slice(formData.manualInstallments.length).forEach(inst => {
+          if (inst.linkedIncomeTxId && onDeleteLinkedIncomeTx) {
+            onDeleteLinkedIncomeTx(inst.linkedIncomeTxId);
+          }
+        });
+      }
     } else {
-      // Default installment logic
       isDefaultSchedule = true;
-      installments = [{
+      const existingFirst = existingInv?.installments?.[0];
+      finalInstallments = [{
         date: formData.maturityDate,
         amount: estimatedReturn,
-        isPaid: false
+        type: 'Repayment' as const,
+        isPaid: existingFirst?.isPaid || false,
+        actualDate: existingFirst?.actualDate,
+        actualAmount: existingFirst?.actualAmount,
+        isAutoMarked: existingFirst?.isAutoMarked,
+        isManuallyEdited: existingFirst?.isManuallyEdited,
+        linkedIncomeTxId: existingFirst?.linkedIncomeTxId
       }];
+
+      if (existingInv?.installments && existingInv.installments.length > 1) {
+        existingInv.installments.slice(1).forEach(inst => {
+          if (inst.linkedIncomeTxId && onDeleteLinkedIncomeTx) {
+            onDeleteLinkedIncomeTx(inst.linkedIncomeTxId);
+          }
+        });
+      }
     }
+
+    const finalTotalRepaid = finalInstallments.reduce(
+      (sum, inst) => inst.isPaid ? sum + (inst.actualAmount !== undefined ? inst.actualAmount : inst.amount) : sum,
+      0
+    );
+
+    const onlineDisplayName = `Online Invest: ${formData.platform}${formData.projectName ? ` - ${formData.projectName}` : formData.companyName ? ` - ${formData.companyName}` : ''}`.trim();
 
     const payload = {
       name: formData.projectName,
@@ -906,21 +1243,33 @@ const toggleSelect = (id: string) => {
       currency: 'BDT' as const,
       hasRepaymentSchedule: formData.hasRepaymentSchedule,
       isDefaultSchedule,
-      installments,
-      totalRepaid: editingId ? (investments.find(i => i.id === editingId)?.totalRepaid || 0) : 0,
+      installments: finalInstallments,
+      totalRepaid: finalTotalRepaid,
+      linkedIeGroupId: linkGroupId,
     };
 
     if (editingId) {
       onUpdate(editingId, payload);
+      if (linkGroupId && onUpdateLinkedTransfer) {
+        onUpdateLinkedTransfer(linkGroupId, {
+          date: payload.investmentDate,
+          amount: payload.amount,
+          description: onlineDisplayName
+        });
+      }
     } else {
       onAdd(payload);
-      if (onNavigateToModule) {
+      if (isExternalCreate) {
+        isFromExternalModuleRef.current = false;
+        setInheritedIeGroupId(undefined);
+      } else if (onNavigateToModule) {
         onNavigateToModule('income-expense', {
           date: payload.investmentDate,
           amount: payload.amount,
           type: 'Transfer',
           targetModule: 'online',
-          description: `Online Invest: ${payload.platform}${payload.projectName ? ` - ${payload.projectName}` : payload.companyName ? ` - ${payload.companyName}` : ''}`.trim()
+          description: onlineDisplayName,
+          linkedTxId: linkGroupId
         });
       }
     }
@@ -928,6 +1277,7 @@ const toggleSelect = (id: string) => {
     setIsModalOpen(false);
     setEditingId(null);
     setFormError(null);
+    checkAndReturnToModule();
     setFormData({
       platform: 'Biniyog',
       companyName: '',
@@ -946,7 +1296,7 @@ const toggleSelect = (id: string) => {
   const addInstallment = () => {
     setFormData({
       ...formData,
-      manualInstallments: [...formData.manualInstallments, { date: '', amount: '' }]
+      manualInstallments: [...formData.manualInstallments, { date: '', amount: '', type: 'Repayment' }]
     });
   };
 
@@ -956,7 +1306,7 @@ const toggleSelect = (id: string) => {
     setFormData({ ...formData, manualInstallments: newInst });
   };
 
-  const updateInstallment = (index: number, field: 'date' | 'amount', value: string) => {
+  const updateInstallment = (index: number, field: 'date' | 'amount' | 'type', value: string) => {
     const newInst = [...formData.manualInstallments];
     newInst[index] = { ...newInst[index], [field]: value };
     setFormData({ ...formData, manualInstallments: newInst });
@@ -965,60 +1315,60 @@ const toggleSelect = (id: string) => {
   return (
     <div className="space-y-8">
 
-{/* Date Range Selector */}
+{/* Date Range Selector — same UI/behavior as Mutual Funds */}
 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/50 border border-slate-800 rounded-xl p-2 relative">
-  
   <div className="flex flex-col sm:flex-row sm:items-center gap-3 w-full sm:w-auto">
-    
-    {/* LINE 1 (Mobile): Range + Settings */}
     <div className="flex items-center justify-between w-full sm:w-auto gap-2">
-
-      {/* Range Selection */}
       <div className="relative flex-1 sm:flex-none">
-
-        {/* Mobile Dropdown */}
+        {/* Mobile View: Dropdown */}
         <div className="block sm:hidden">
-          <button 
-            onClick={() => setIsHistoryMenuOpen(!isHistoryMenuOpen)}
+          <button
+            onClick={() => setIsRangeMenuOpen(!isRangeMenuOpen)}
             className="flex items-center justify-between gap-4 bg-slate-950 border border-slate-800 rounded-lg px-4 h-9 text-[10px] font-bold text-slate-300 hover:text-white transition-all uppercase w-full"
           >
             <div className="flex items-center gap-2">
               <Calendar size={14} className="text-teal-400" />
-              {historyRange === 'all' ? 'Overall' : 
-               historyRange === 'last12m' ? 'Last 12M' : 
-               historyRange === 'fiscal' ? 'Fiscal' : 'Custom'}
+              {historyRange === 'this'
+                ? 'This month'
+                : historyRange === 'fiscal'
+                  ? 'Fiscal'
+                  : 'Custom'}
             </div>
-
-            <ChevronDown 
-              size={14} 
+            <ChevronDown
+              size={14}
               className={cn(
                 "text-slate-500 transition-transform",
-                isHistoryMenuOpen ? "rotate-180 text-teal-400" : ""
-              )} 
+                isRangeMenuOpen ? "rotate-180 text-teal-400" : ""
+              )}
             />
           </button>
 
-          {isHistoryMenuOpen && (
+          {isRangeMenuOpen && (
             <>
-              <div className="fixed inset-0 z-40" onClick={() => setIsHistoryMenuOpen(false)} />
-              <div className="absolute left-0 mt-2 w-full bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95 backdrop-blur-md">
-                {['all','last12m','fiscal','custom'].map((id) => (
+              <div
+                className="fixed inset-0 z-40"
+                onClick={() => setIsRangeMenuOpen(false)}
+              />
+              <div className="absolute left-0 mt-2 w-full bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95">
+                {(['this', 'fiscal', 'custom'] as const).map(id => (
                   <button
                     key={id}
                     onClick={() => {
-                      setHistoryRange(id as any);
-                      setIsHistoryMenuOpen(false);
+                      handleRangeChange(id);
+                      setIsRangeMenuOpen(false);
                     }}
                     className={cn(
                       "w-full text-left px-3 py-2 text-[10px] font-bold rounded-lg transition-colors uppercase",
-                      historyRange === id 
-                        ? "bg-teal-400 text-slate-950" 
+                      historyRange === id
+                        ? "bg-teal-400 text-slate-950"
                         : "text-slate-300 hover:bg-slate-800"
                     )}
                   >
-                    {id === 'all' ? 'Overall' : 
-                     id === 'last12m' ? 'Last 12M' : 
-                     id === 'fiscal' ? 'Fiscal' : 'Custom'}
+                    {id === 'this'
+                      ? 'This month'
+                      : id === 'fiscal'
+                        ? 'Fiscal'
+                        : 'Custom'}
                   </button>
                 ))}
               </div>
@@ -1026,28 +1376,30 @@ const toggleSelect = (id: string) => {
           )}
         </div>
 
-        {/* Desktop Tabs */}
-        <div className="hidden sm:flex items-center bg-slate-950/50 rounded-lg p-1 border border-slate-800/50 gap-1">
-          {['all','last12m','fiscal','custom'].map(id => (
+        {/* Desktop View: Tabs */}
+        <div className="hidden sm:flex items-center bg-slate-950/50 rounded-lg p-1 border border-slate-800/50 gap-1 font-sans">
+          {(['this', 'fiscal', 'custom'] as const).map(id => (
             <button
               key={id}
-              onClick={() => handleRangeChange(id as any)}
+              onClick={() => handleRangeChange(id)}
               className={cn(
                 "px-4 py-1.5 rounded-md text-[10px] font-bold uppercase transition-all border",
-                historyRange === id 
-                  ? "bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/20" 
+                historyRange === id
+                  ? "bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/20"
                   : "bg-slate-900/40 border-slate-800/40 text-slate-300 hover:text-white"
               )}
             >
-              {id === 'all' ? 'Overall' : 
-               id === 'last12m' ? 'Last 12M' : 
-               id === 'fiscal' ? 'Fiscal' : 'Custom'}
+              {id === 'this'
+                ? 'This month'
+                : id === 'fiscal'
+                  ? 'Fiscal'
+                  : 'Custom'}
             </button>
           ))}
         </div>
       </div>
 
-      {/* Settings Button - Mobile */}
+      {/* Settings Button - Mobile Only */}
       <div className="block sm:hidden">
         <div className="relative">
           <button 
@@ -1103,93 +1455,130 @@ const toggleSelect = (id: string) => {
       </div>
     </div>
 
-    {/* LINE 2 (Mobile): Custom Dates */}
-    {historyRange === 'custom' && (
-      <div className="flex items-center justify-center sm:justify-start gap-1.5 px-1 animate-in fade-in slide-in-from-top-2 sm:slide-in-from-left-2 duration-300 w-full sm:w-auto">
-        
-        <button onClick={() => navigateCustomMonth(-1)} className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400">
-          <ChevronLeft size={14} />
-        </button>
+    {/* Date Browsing Controls */}
+    <div className="flex items-center gap-1.5 px-1 animate-in fade-in duration-300">
+      <button
+        onClick={() => {
+          if (historyRange === 'this') {
+            navigateHistoryThisMonth(-1);
+          } else if (historyRange === 'fiscal') {
+            setHistoryFiscalStartYear(prev => prev - 1);
+          } else {
+            navigateHistoryCustomMonth(-1);
+          }
+        }}
+        className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+      >
+        <ChevronLeft size={14} />
+      </button>
 
-        <input
-          type="date"
-          value={historyCustomDates.start}
-          onChange={(e) => setHistoryCustomDates(prev => ({ ...prev, start: e.target.value }))}
-          className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none focus:border-teal-400/50 uppercase flex-1 sm:flex-none"
-        />
+      {historyRange === 'custom' ? (
+        <div className="flex items-center gap-1.5">
+          <input
+            type="date"
+            value={historyCustomDates.start}
+            onChange={e => setHistoryCustomDates(prev => ({
+              ...prev,
+              start: e.target.value
+            }))}
+            className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none uppercase cursor-pointer"
+          />
+          <span className="text-slate-700 font-bold text-[10px]">–</span>
+          <input
+            type="date"
+            value={historyCustomDates.end}
+            onChange={e => setHistoryCustomDates(prev => ({
+              ...prev,
+              end: e.target.value
+            }))}
+            className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none uppercase cursor-pointer"
+          />
+        </div>
+      ) : historyRange === 'fiscal' ? (
+        <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-[10px] font-bold text-white uppercase select-none tracking-wider whitespace-nowrap min-w-[160px] text-center">
+          July {historyFiscalStartYear} - June {historyFiscalStartYear + 1}
+        </div>
+      ) : (
+        <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-[10px] font-bold text-teal-400 uppercase select-none tracking-wider whitespace-nowrap min-w-[120px] text-center">
+          {formatHistoryThisMonthLabel(historyThisMonthDate)}
+        </div>
+      )}
 
-        <span className="text-slate-700 text-[10px] font-bold">–</span>
-
-        <input
-          type="date"
-          value={historyCustomDates.end}
-          onChange={(e) => setHistoryCustomDates(prev => ({ ...prev, end: e.target.value }))}
-          className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none focus:border-teal-400/50 uppercase flex-1 sm:flex-none"
-        />
-
-        <button onClick={() => navigateCustomMonth(1)} className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400">
-          <ChevronRight size={14} />
-        </button>
-      </div>
-    )}
+      <button
+        onClick={() => {
+          if (historyRange === 'this') {
+            navigateHistoryThisMonth(1);
+          } else if (historyRange === 'fiscal') {
+            setHistoryFiscalStartYear(prev => prev + 1);
+          } else {
+            navigateHistoryCustomMonth(1);
+          }
+        }}
+        className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+      >
+        <ChevronRight size={14} />
+      </button>
+    </div>
   </div>
 
-  {/* Settings Button - Desktop */}
-  <div className="hidden sm:block relative">
-    <button 
-      onClick={() => setIsSettingsMenuOpen(!isSettingsMenuOpen)}
-      className="flex items-center justify-center gap-2 px-3 sm:px-4 py-2 rounded-md text-[10px] font-bold uppercase transition-all whitespace-nowrap bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/10 hover:bg-teal-300 hover:shadow-teal-400/20"
-    >
-      <Settings size={14} />
-      <span className="hidden sm:inline">Settings</span>
-      <ChevronDown size={14} className={cn("opacity-50 transition-transform", isSettingsMenuOpen ? "rotate-180" : "")} />
-    </button>
+  {/* Settings Button - Desktop Only */}
+  <div className="hidden sm:block">
+    <div className="relative">
+      <button 
+        onClick={() => setIsSettingsMenuOpen(!isSettingsMenuOpen)}
+        className="flex items-center justify-center gap-2 px-3 sm:px-4 py-2 rounded-md text-[10px] font-bold uppercase transition-all whitespace-nowrap bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/10 hover:bg-teal-300 hover:shadow-teal-400/20"
+      >
+        <Settings size={14} />
+        <span className="hidden sm:inline">Settings</span>
+        <ChevronDown size={14} className={cn("opacity-50 transition-transform", isSettingsMenuOpen ? "rotate-180" : "")} />
+      </button>
 
-    {isSettingsMenuOpen && (
-      <>
-        <div className="fixed inset-0 z-40" onClick={() => setIsSettingsMenuOpen(false)} />
-        <div className="absolute right-0 mt-2 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-2 backdrop-blur-xl">
-          
-          <button 
-              onClick={() => { exportToExcel(); setIsSettingsMenuOpen(false); }}
-              className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
-            >
-              <Download size={14} className="text-teal-400" />
-              EXPORT
-            </button>
-            <label className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase cursor-pointer">
-              <Upload size={14} className="text-teal-400" />
-              IMPORT
-              <input type="file" className="hidden" accept=".xlsx,.xls" onChange={importData} />
-            </label>
+      {isSettingsMenuOpen && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setIsSettingsMenuOpen(false)} />
+          <div className="absolute right-0 mt-2 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-2 backdrop-blur-xl">
+            
             <button 
-              onClick={() => { alert('Template not implemented'); setIsSettingsMenuOpen(false); }}
-              className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
-            >
-              <FileSpreadsheet size={14} className="text-teal-400" />
-              TEMPLATE
-            </button>
-
-            <div className="h-px bg-slate-800/60 my-2" />
-
-            <div className="px-3 pb-2">
-              <input 
-                placeholder="Platform Name"
-                value={newPlatformName}
-                onChange={(e) => setNewPlatformName(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-[10px] text-white focus:outline-none focus:border-teal-400"
-              />
-              <button 
-                onClick={handleAddPlatform}
-                className="w-full mt-2 flex items-center justify-center gap-2 py-1.5 bg-teal-400 hover:bg-teal-300 text-slate-950 rounded-lg font-bold text-[10px] uppercase transition-colors"
+                onClick={() => { exportToExcel(); setIsSettingsMenuOpen(false); }}
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
               >
-                Add Platform
+                <Download size={14} className="text-teal-400" />
+                EXPORT
               </button>
-            </div>
-          
-        </div>
-      </>
-    )}
+              <label className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase cursor-pointer">
+                <Upload size={14} className="text-teal-400" />
+                IMPORT
+                <input type="file" className="hidden" accept=".xlsx,.xls" onChange={importData} />
+              </label>
+              <button 
+                onClick={() => { alert('Template not implemented'); setIsSettingsMenuOpen(false); }}
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
+              >
+                <FileSpreadsheet size={14} className="text-teal-400" />
+                TEMPLATE
+              </button>
+
+              <div className="h-px bg-slate-800/60 my-2" />
+
+              <div className="px-3 pb-2">
+                <input 
+                  placeholder="Platform Name"
+                  value={newPlatformName}
+                  onChange={(e) => setNewPlatformName(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-[10px] text-white focus:outline-none focus:border-teal-400"
+                />
+                <button 
+                  onClick={handleAddPlatform}
+                  className="w-full mt-2 flex items-center justify-center gap-2 py-1.5 bg-teal-400 hover:bg-teal-300 text-slate-950 rounded-lg font-bold text-[10px] uppercase transition-colors"
+                >
+                  Add Platform
+                </button>
+              </div>
+            
+          </div>
+        </>
+      )}
+    </div>
   </div>
 </div>
 
@@ -1214,7 +1603,7 @@ const toggleSelect = (id: string) => {
               <p className="text-label font-bold text-slate-500 uppercase">Active Investment</p>
             </div>
             <h3 className="text-heading font-bold text-white mb-4 tracking-tight font-display tabular-nums">
-              {formatBDT(historyStats.active)}
+              {formatBDT(historyStats.currentHolding)}
             </h3>
           </div>
           <div className="flex flex-col justify-center gap-0.5 pt-4 border-t border-slate-800 h-14">
@@ -1231,17 +1620,17 @@ const toggleSelect = (id: string) => {
               <TrendingUp size={20} />
             </div>
             <div className="mb-2">
-              <p className="text-body-sm font-bold text-white uppercase tracking-wider">Projected Profit</p>
-              <p className="text-label font-bold text-slate-500 uppercase">On Active Investment</p>
+              <p className="text-body-sm font-bold text-white uppercase tracking-wider">Active Investment</p>
+              <p className="text-label font-bold text-slate-500 uppercase">Active Principal</p>
             </div>
             <h3 className="text-heading font-bold text-white mb-3 tracking-tight font-display tabular-nums">
-              {formatBDT(historyStats.projectedProfit)}
+              {formatBDT(historyStats.activeInvestment)}
             </h3>
           </div>
           <div className="flex flex-col justify-center gap-0.5 pt-4 border-t border-slate-800 h-14">
-            <p className="text-label font-medium text-slate-300 uppercase">Projected ROI</p>
-            <p className={cn("text-body font-bold tabular-nums", historyStats.avgProjectedROI >= 0 ? "text-emerald-400" : "text-rose-500")}>
-              {historyStats.avgProjectedROI.toFixed(1)}%
+            <p className="text-label font-medium text-slate-300 uppercase">Projected Profit</p>
+            <p className={cn("text-body font-bold tabular-nums", historyStats.projectedProfit >= 0 ? "text-emerald-400" : "text-rose-500")}>
+              {formatBDT(historyStats.projectedProfit)}
             </p>
           </div>
         </Card>
@@ -1618,7 +2007,7 @@ const toggleSelect = (id: string) => {
                 <div className="flex items-center gap-3">
                   <Checkbox 
                     checked={selectedIds.includes(inv.id)}
-                    onChange={() => toggleSelect(inv.id)}
+                    onChange={(_, e) => toggleSelect(inv.id, e)}
                   />
                   <div className={cn("w-2 h-2 rounded-full animate-pulse", status === 'Completed' ? 'bg-slate-500' : 'bg-teal-400')} />
                   <span className="text-[9px] sm:text-body-sm font-bold uppercase tracking-tight tabular-nums truncate max-w-[180px] sm:max-w-none">
@@ -1808,6 +2197,15 @@ const toggleSelect = (id: string) => {
                                   value={inst.amount}
                                   onChange={(e) => handleUpdateInstallmentValue(inv.id, idx, 'amount', e.target.value)}
                                 />
+                                <div className="w-px h-4 bg-slate-800" />
+                                <select
+                                  className="bg-transparent text-label text-teal-400 font-bold border-none focus:ring-0 p-0 cursor-pointer"
+                                  value={inst.type || 'Repayment'}
+                                  onChange={(e) => handleUpdateInstallmentValue(inv.id, idx, 'type', e.target.value)}
+                                >
+                                  <option value="Repayment" className="bg-slate-900 text-white">Repayment</option>
+                                  <option value="Interest" className="bg-slate-900 text-white">Interest</option>
+                                </select>
                               </div>
                             ) : customRepaymentIdx === idx ? (
                               <div className="flex items-center gap-2 bg-slate-950 p-2 rounded-lg border border-teal-400/50 animate-in zoom-in-95">
@@ -1856,6 +2254,11 @@ const toggleSelect = (id: string) => {
                                     >
                                       <CheckCircle2 size={14} />
                                       <div className="text-left">
+                                        {inst.type === 'Interest' && (
+                                          <span className="block text-[9px] font-extrabold text-teal-400 uppercase tracking-wider mb-0.5 leading-none">
+                                            Interest
+                                          </span>
+                                        )}
                                         <p className="text-label font-bold tabular-nums flex items-center gap-1.5">
                                           {formatDate(inst.actualDate || inst.date)}
                                           {warning && (
@@ -2018,8 +2421,9 @@ const toggleSelect = (id: string) => {
         onClose={() => {
           setIsModalOpen(false);
           setEditingId(null);
+          checkAndReturnToModule();
         }} 
-        title={editingId ? "Edit Investment" : "Add New Investment"}
+        title={editingId ? "Edit Investment" : "Add Investment"}
       >
         <form onSubmit={handleSubmit} className="space-y-4">
           {formError && (
@@ -2131,7 +2535,17 @@ const toggleSelect = (id: string) => {
             <Checkbox 
               label="Enable Repayment Schedule" 
               checked={formData.hasRepaymentSchedule}
-              onChange={(checked) => setFormData({ ...formData, hasRepaymentSchedule: checked })}
+              onChange={(checked) => {
+                let insts = formData.manualInstallments;
+                if (checked && insts.length === 0) {
+                  insts = [{
+                    date: formData.maturityDate || '',
+                    amount: formData.estimatedReturn || '',
+                    type: 'Repayment'
+                  }];
+                }
+                setFormData({ ...formData, hasRepaymentSchedule: checked, manualInstallments: insts });
+              }}
             />
             {formData.hasRepaymentSchedule && (
               <div className="space-y-2 animate-in fade-in slide-in-from-top-2">
@@ -2140,14 +2554,14 @@ const toggleSelect = (id: string) => {
                   <button 
                     type="button" 
                     onClick={addInstallment}
-                    className="text-label font-bold text-teal-400 hover:text-teal-300 flex items-center gap-1 uppercase"
+                    className="text-label font-bold text-teal-400 hover:text-teal-300 flex items-center gap-1 uppercase cursor-pointer"
                   >
                     <Plus size={10} /> Add Row
                   </button>
                 </div>
-                <div className="max-h-32 overflow-y-auto space-y-2 pr-1">
+                <div className="max-h-52 overflow-y-auto space-y-2 pr-1">
                   {formData.manualInstallments.map((inst, idx) => (
-                    <div key={idx} className="grid grid-cols-[1fr_1fr_auto] gap-2 items-end">
+                    <div key={idx} className="grid grid-cols-[1.1fr_1fr_1.1fr_auto] gap-2 items-end">
                       <Input 
                         label="Date" 
                         type="date" 
@@ -2163,17 +2577,29 @@ const toggleSelect = (id: string) => {
                         value={inst.amount}
                         onChange={(e) => updateInstallment(idx, 'amount', e.target.value)}
                       />
+                      <div className="space-y-1.5">
+                        <label className="text-label font-bold text-slate-300 uppercase">Type</label>
+                        <select
+                          className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 h-8 text-label font-bold text-slate-300 focus:outline-none focus:ring-2 focus:ring-teal-400/50 focus:border-teal-400 transition-all cursor-pointer"
+                          value={inst.type || 'Repayment'}
+                          onChange={(e) => updateInstallment(idx, 'type', e.target.value as 'Repayment' | 'Interest')}
+                        >
+                          <option value="Repayment" className="bg-slate-900 text-white">Repayment</option>
+                          <option value="Interest" className="bg-slate-900 text-white">Interest</option>
+                        </select>
+                      </div>
                       <button 
                         type="button" 
                         onClick={() => removeInstallment(idx)}
-                        className="p-1.5 text-rose-500 hover:bg-rose-500/10 rounded-lg mb-0.5"
+                        className="p-1.5 text-rose-500 hover:bg-rose-500/10 rounded-lg mb-0.5 cursor-pointer"
+                        title="Remove installment"
                       >
                         <X size={14} />
                       </button>
                     </div>
                   ))}
                   {formData.manualInstallments.length === 0 && (
-                    <p className="text-label text-slate-500 text-center py-2 italic uppercase">No installments added yet.</p>
+                    <p className="text-label text-slate-500 text-center py-2 italic uppercase">No installments added yet. Click &quot;Add Row&quot; above.</p>
                   )}
                 </div>
               </div>
@@ -2204,11 +2630,11 @@ const toggleSelect = (id: string) => {
           )}
 
           <div className="pt-2 flex gap-3">
-            <Button type="button" variant="secondary" className="flex-1 py-2" onClick={() => setIsModalOpen(false)}>
+            <Button type="button" variant="secondary" className="flex-1 py-2" onClick={() => { setIsModalOpen(false); checkAndReturnToModule(); }}>
               Cancel
             </Button>
             <Button type="submit" className="flex-1 py-2">
-              {editingId ? "Update Investment" : "Save Investment"}
+              {editingId ? "Update Investment" : "Create Investment"}
             </Button>
           </div>
         </form>

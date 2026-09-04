@@ -70,7 +70,7 @@ const menuItems = [
     icon: BarChart3,
     children: [
       { id: 'income-expense-summary', label: 'Summary', icon: DollarSign },
-      { id: 'income-expense-transactions', label: 'Transaction', icon: Layers },
+      { id: 'income-expense-transactions', label: 'Transactions', icon: Layers },
       { id: 'income-expense-analytics', label: 'Analytics', icon: BarChart2 },
       { id: 'income-expense-settings', label: 'Settings', icon: SlidersHorizontal },
     ]

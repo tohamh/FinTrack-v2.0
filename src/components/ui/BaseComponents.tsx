@@ -149,11 +149,22 @@ export const Input: React.FC<InputProps> = ({ label, className, as = 'input', he
   );
 };
 
-export const Checkbox: React.FC<{ label?: string; checked: boolean; onChange: (checked: boolean) => void; id?: string }> = ({ label, checked, onChange, id }) => {
+export const Checkbox: React.FC<{ 
+  label?: string; 
+  checked: boolean; 
+  onChange: (checked: boolean, e?: React.MouseEvent) => void; 
+  id?: string;
+  className?: string;
+}> = ({ label, checked, onChange, id, className }) => {
   return (
-    <label id={id} className="flex items-center gap-3 cursor-pointer group">
+    <div 
+      id={id} 
+      onClick={(e) => {
+        onChange(!checked, e);
+      }}
+      className={cn("flex items-center gap-3 cursor-pointer group select-none", className)}
+    >
       <div 
-        onClick={() => onChange(!checked)}
         className={cn(
           'w-5 h-5 rounded border flex items-center justify-center transition-all shrink-0',
           checked ? 'bg-teal-400 border-teal-400' : 'bg-slate-950 border-slate-700 group-hover:border-slate-500'
@@ -162,7 +173,7 @@ export const Checkbox: React.FC<{ label?: string; checked: boolean; onChange: (c
         {checked && <svg className="w-3.5 h-3.5 text-slate-950 stroke-[3]" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>}
       </div>
       {label && <span className="text-label font-bold text-slate-300 uppercase group-hover:text-white transition-colors">{label}</span>}
-    </label>
+    </div>
   );
 };
 

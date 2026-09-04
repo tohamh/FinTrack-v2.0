@@ -34,6 +34,7 @@ export interface MutualFundTransaction {
   isWithdrawal?: boolean;
   pullingDate?: string;
   sipAmount?: number;
+  linkedIeGroupId?: string;
 }
 
 export interface MutualFund extends BaseInvestment {
@@ -46,6 +47,8 @@ export interface MutualFund extends BaseInvestment {
 }
 
 export type OnlineInvestmentStatus = 'Active' | 'Completed' | 'Delayed' | 'Matured';
+
+export type OnlineInstallmentType = 'Repayment' | 'Interest';
 
 export interface OnlineInvestment extends BaseInvestment {
   platform: string;
@@ -64,6 +67,7 @@ export interface OnlineInvestment extends BaseInvestment {
   status: OnlineInvestmentStatus;
   hasRepaymentSchedule: boolean;
   isDefaultSchedule: boolean;
+  linkedIeGroupId?: string;
   installments: { 
     date: string; 
     amount: number; 
@@ -72,6 +76,8 @@ export interface OnlineInvestment extends BaseInvestment {
     actualAmount?: number;
     isAutoMarked?: boolean;
     isManuallyEdited?: boolean;
+    linkedIncomeTxId?: string;
+    type?: OnlineInstallmentType;
   }[];
   totalRepaid: number;
 }
@@ -89,6 +95,9 @@ export interface Sukuk extends BaseInvestment {
   durationYears: number;
   totalRepaid: number;
   status: OnlineInvestmentStatus;
+  closingDate?: string;
+  withdrawBalance?: number;
+  linkedIeGroupId?: string;
   installments: { 
     date: string; 
     amount: number; 
@@ -98,6 +107,7 @@ export interface Sukuk extends BaseInvestment {
     isAutoMarked?: boolean;
     isManuallyEdited?: boolean;
     installmentNo: number;
+    linkedIncomeTxId?: string;
   }[];
 }
 
@@ -107,6 +117,7 @@ export interface FDRTransaction {
   type: 'Profit' | 'Charge';
   amount: number;
   handling?: 'Added' | 'Withdrawn';
+  linkedIncomeTxId?: string;
 }
 
 export interface FDR extends BaseInvestment {
@@ -158,6 +169,12 @@ export interface IncomeExpenseTransaction {
   description: string;
   dseTxId?: string;
   autoSyncDse?: boolean;
+  mfTxId?: string;
+  sukukTxId?: string;
+  sukukInstallmentNo?: number;
+  fdrTxId?: string;
+  onlineTxId?: string;
+  onlineInstallmentNo?: number;
 }
 
 export interface ConversionRates {

@@ -23,9 +23,13 @@ interface SukukInvestmentsProps {
   onActiveInvestmentChange?: (amount: number) => void; // [CHANGE 3] new callback
   triggerAdd?: boolean;
   setTriggerAdd?: (val: boolean) => void;
-  inheritedData?: { date: string; amount: number } | null;
+  inheritedData?: { date: string; amount: number; linkedTxId?: string; description?: string; returnModule?: string; [key: string]: any } | null;
   onClearInheritedData?: () => void;
-  onNavigateToModule?: (module: string, initialAddData?: { date: string; amount: number; type?: 'Transfer' | 'Income' | 'Expense' | 'Loan'; targetModule?: string; description?: string }) => void;
+  onNavigateToModule?: (module: string, initialAddData?: any, openModal?: boolean) => void;
+  onDeleteLinkedTransfer?: (groupId: string) => void;
+  onUpdateLinkedTransfer?: (groupId: string, updates: { date: string; amount: number; description?: string }) => void;
+  onDeleteLinkedIncomeTx?: (txId: string) => void;
+  onUpdateLinkedIncomeTx?: (txId: string, updates: { date: string; amount: number; description?: string }) => void;
 }
 
 export const SukukInvestments: React.FC<SukukInvestmentsProps> = ({ 
@@ -42,8 +46,23 @@ export const SukukInvestments: React.FC<SukukInvestmentsProps> = ({
   setTriggerAdd,
   inheritedData,
   onClearInheritedData,
-  onNavigateToModule
+  onNavigateToModule,
+  onDeleteLinkedTransfer,
+  onUpdateLinkedTransfer,
+  onDeleteLinkedIncomeTx,
+  onUpdateLinkedIncomeTx
 }) => {
+  const isFromExternalModuleRef = React.useRef(false);
+  const returnModuleRef = React.useRef<string | undefined>(undefined);
+  const [inheritedIeGroupId, setInheritedIeGroupId] = useState<string | undefined>(undefined);
+
+  const checkAndReturnToModule = () => {
+    if (returnModuleRef.current && onNavigateToModule) {
+      const ret = returnModuleRef.current;
+      returnModuleRef.current = undefined;
+      onNavigateToModule(ret, undefined, false);
+    }
+  };
   const [selectedProfiles, setSelectedProfiles] = useState<OnlineInvestmentStatus[]>(['Active', 'Delayed', 'Matured']);
   const [sortBy, setSortBy] = useState<'date' | 'amount' | 'roi' | 'issuer'>('date');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
@@ -62,8 +81,11 @@ export const SukukInvestments: React.FC<SukukInvestmentsProps> = ({
     title: string; 
     message: string; 
     onConfirm: () => void; 
-    variant?: 'danger' | 'warning' | 'info';
+    onCancel?: () => void;
+    variant?: 'danger' | 'warning' | 'info' | 'severe' | 'critical';
     confirmLabel?: string;
+    cancelLabel?: string;
+    details?: (string | null | undefined)[];
   } | null>(null);
 
   const closeConfirm = () => setConfirmState(prev => prev ? { ...prev, isOpen: false } : null);
@@ -71,48 +93,105 @@ export const SukukInvestments: React.FC<SukukInvestmentsProps> = ({
   const [customRepaymentData, setCustomRepaymentData] = useState({ date: '', amount: '' });
   const [activeWarning, setActiveWarning] = useState<{ id: string, text: string } | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
-  const [historyRange, setHistoryRange] = useState<'all' | 'last12m' | 'fiscal' | 'custom'>('all');
+
+  // ─── Date Range Configuration (same range selector as Mutual Funds) ───
+  const [historyRange, setHistoryRange] = useState<'this' | 'fiscal' | 'custom'>('custom');
   const [historyCustomDates, setHistoryCustomDates] = useState(() => {
-    const now = new Date();
     return {
-      start: getFirstOfMonth(now),
+      start: '2025-01-01',
       end: getTodayStr(),
     };
   });
-  const [customNavMonth, setCustomNavMonth] = useState<{ year: number; month: number }>(() => {
+  const [historyThisMonthDate, setHistoryThisMonthDate] = useState(() => {
     const now = new Date();
-    return { year: now.getFullYear(), month: now.getMonth() };
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
+  const [historyFiscalStartYear, setHistoryFiscalStartYear] = useState(() => {
+    const now = new Date();
+    return now.getMonth() >= 6 ? now.getFullYear() : now.getFullYear() - 1;
   });
 
-  const navigateCustomMonth = (direction: -1 | 1) => {
+  const navigateHistoryCustomMonth = (offset: number) => {
+    const currentStart = new Date(historyCustomDates.start);
+    const nextMonth = new Date(currentStart.getFullYear(), currentStart.getMonth() + offset, 1);
     const now = new Date();
-    const newMonth = customNavMonth.month + direction;
-    let year = customNavMonth.year;
-    let month = newMonth;
-    if (month < 0) { month = 11; year -= 1; }
-    if (month > 11) { month = 0; year += 1; }
-    const navDate = new Date(year, month, 1);
-    const isCurrentMonth = year === now.getFullYear() && month === now.getMonth();
-    setCustomNavMonth({ year, month });
+    const isCurrentMonth =
+      nextMonth.getFullYear() === now.getFullYear() &&
+      nextMonth.getMonth() === now.getMonth();
+
     setHistoryCustomDates({
-      start: getFirstOfMonth(navDate),
-      end: isCurrentMonth ? getTodayStr() : getLastOfMonth(navDate),
+      start: getFirstOfMonth(nextMonth),
+      end: isCurrentMonth ? getTodayStr() : getLastOfMonth(nextMonth),
     });
   };
 
-  const handleRangeChange = (newRange: 'all' | 'last12m' | 'fiscal' | 'custom') => {
+  const navigateHistoryThisMonth = (offset: number) => {
+    setHistoryThisMonthDate(prev => new Date(prev.getFullYear(), prev.getMonth() + offset, 1));
+  };
+
+  const handleRangeChange = (newRange: 'this' | 'fiscal' | 'custom') => {
     if (newRange === 'custom') {
-      const now = new Date();
-      const navMonth = { year: now.getFullYear(), month: now.getMonth() };
-      setCustomNavMonth(navMonth);
       setHistoryCustomDates({
-        start: getFirstOfMonth(now),
+        start: '2025-01-01',
         end: getTodayStr(),
       });
     }
     setHistoryRange(newRange);
   };
-  const [isHistoryMenuOpen, setIsHistoryMenuOpen] = useState(false);
+
+  const formatHistoryThisMonthLabel = (d: Date) => {
+    const months = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    return `${months[d.getMonth()]} ${d.getFullYear()}`;
+  };
+
+  // Derive active date range for dashboard stats.
+  // This uses the same This Month / Fiscal / Custom semantics as Mutual Funds.
+  const rangeDates = useMemo(() => {
+    if (historyRange === 'this') {
+      return {
+        start: new Date(
+          historyThisMonthDate.getFullYear(),
+          historyThisMonthDate.getMonth(),
+          1
+        ),
+        end: new Date(
+          historyThisMonthDate.getFullYear(),
+          historyThisMonthDate.getMonth() + 1,
+          0,
+          23, 59, 59, 999
+        )
+      };
+    }
+
+    if (historyRange === 'fiscal') {
+      return {
+        start: new Date(historyFiscalStartYear, 6, 1),
+        end: new Date(historyFiscalStartYear + 1, 5, 30, 23, 59, 59, 999)
+      };
+    }
+
+    const start = historyCustomDates.start
+      ? new Date(historyCustomDates.start)
+      : new Date(0);
+    const end = historyCustomDates.end
+      ? new Date(historyCustomDates.end)
+      : new Date();
+
+    start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
+
+    return { start, end };
+  }, [
+    historyRange,
+    historyCustomDates,
+    historyThisMonthDate,
+    historyFiscalStartYear
+  ]);
+
+  const [isRangeMenuOpen, setIsRangeMenuOpen] = useState(false);
   
   const [formData, setFormData] = useState({
     name: '',
@@ -129,31 +208,116 @@ export const SukukInvestments: React.FC<SukukInvestmentsProps> = ({
     withdrawBalance: '',
   });
 
-  // Handle external trigger for adding
+  const [isRentModalOpen, setIsRentModalOpen] = useState(false);
+  const [selectedRentSukukId, setSelectedRentSukukId] = useState<string>('');
+  const [selectedRentInstIdx, setSelectedRentInstIdx] = useState<number>(0);
+  const [rentFormData, setRentFormData] = useState({
+    date: '',
+    amount: '',
+  });
+  const [inheritedIncomeTxId, setInheritedIncomeTxId] = useState<string | undefined>(undefined);
+
+  // Handle external trigger for adding or editing
   React.useEffect(() => {
     if (triggerAdd) {
-      setEditingId(null);
+      const isExternalTrigger = !!inheritedData;
+      isFromExternalModuleRef.current = isExternalTrigger;
+      returnModuleRef.current = inheritedData?.returnModule;
+
       const inheritedDate = inheritedData?.date || new Date().toISOString().split('T')[0];
       const inheritedAmt = (inheritedData?.amount !== undefined && inheritedData.amount !== null && inheritedData.amount !== 0) ? String(inheritedData.amount) : '';
-      setFormData({
-        name: '',
-        instrumentNo: '',
-        issuer: 'Bangladesh Bank',
-        rentRate: '',
-        tds: '10',
-        frequency: 'Semi-annual',
-        principalAmount: inheritedAmt,
-        issueDate: inheritedDate,
-        durationYears: '',
-        status: 'Active',
-        closingDate: '',
-        withdrawBalance: '',
-      });
-      setIsModalOpen(true);
+
+      if (inheritedData?.type === 'Income' || inheritedData?.targetModule === 'sukuk-rent') {
+        setInheritedIncomeTxId(inheritedData?.linkedTxId);
+        const descLower = (inheritedData?.description || '').toLowerCase();
+
+        // Find best matching Sukuk
+        let matchedSukuk = investments.find(inv =>
+          (inv.name && descLower.includes(inv.name.toLowerCase())) ||
+          (inv.issuer && descLower.includes(inv.issuer.toLowerCase())) ||
+          (inv.instrumentNo && descLower.includes(inv.instrumentNo.toLowerCase())) ||
+          inv.installments?.some(i => i.linkedIncomeTxId === inheritedData.linkedTxId)
+        );
+
+        if (!matchedSukuk) {
+          matchedSukuk = investments.find(s => s.installments?.some(i => !i.isPaid)) || investments[0];
+        }
+
+        if (matchedSukuk) {
+          const sukukId = matchedSukuk.id;
+          let instIdx = matchedSukuk.installments?.findIndex(i => i.linkedIncomeTxId === inheritedData.linkedTxId);
+          if (instIdx === undefined || instIdx < 0) {
+            instIdx = matchedSukuk.installments?.findIndex(i => !i.isPaid && (i.date === inheritedDate || i.date.substring(0, 7) === inheritedDate.substring(0, 7)));
+          }
+          if (instIdx === undefined || instIdx < 0) {
+            instIdx = matchedSukuk.installments?.findIndex(i => !i.isPaid);
+          }
+          if (instIdx === undefined || instIdx < 0) {
+            instIdx = 0;
+          }
+
+          setSelectedRentSukukId(sukukId);
+          setSelectedRentInstIdx(instIdx);
+          setRentFormData({
+            date: inheritedDate,
+            amount: inheritedAmt || (matchedSukuk.installments?.[instIdx] ? String(matchedSukuk.installments[instIdx].amount) : ''),
+          });
+          setIsRentModalOpen(true);
+        }
+      } else {
+        setInheritedIeGroupId(isExternalTrigger ? inheritedData?.linkedTxId : undefined);
+
+        // Check if there is an existing linked Sukuk (by linkedTxId)
+        let existingLinkedSukuk: Sukuk | undefined;
+        if (inheritedData?.linkedTxId) {
+          existingLinkedSukuk = investments.find(inv => inv.linkedIeGroupId === inheritedData.linkedTxId);
+        }
+
+        if (existingLinkedSukuk) {
+          // Edit mode: preserve existing fields and update with new amount/date
+          setEditingId(existingLinkedSukuk.id);
+          setFormData({
+            name: existingLinkedSukuk.name,
+            instrumentNo: existingLinkedSukuk.instrumentNo,
+            issuer: existingLinkedSukuk.issuer,
+            rentRate: existingLinkedSukuk.rentRate !== undefined ? existingLinkedSukuk.rentRate.toString() : '',
+            tds: existingLinkedSukuk.tds !== undefined ? existingLinkedSukuk.tds.toString() : '10',
+            frequency: existingLinkedSukuk.frequency || 'Semi-annual',
+            principalAmount: (inheritedAmt && inheritedAmt !== '0') ? inheritedAmt : (existingLinkedSukuk.principalAmount !== undefined ? existingLinkedSukuk.principalAmount.toString() : ''),
+            issueDate: inheritedDate || existingLinkedSukuk.issueDate,
+            durationYears: existingLinkedSukuk.durationYears !== undefined ? existingLinkedSukuk.durationYears.toString() : '',
+            status: existingLinkedSukuk.status || 'Active',
+            closingDate: existingLinkedSukuk.closingDate || '',
+            withdrawBalance: existingLinkedSukuk.withdrawBalance !== undefined
+              ? existingLinkedSukuk.withdrawBalance.toString()
+              : (existingLinkedSukuk.principalAmount !== undefined ? existingLinkedSukuk.principalAmount.toString() : ''),
+          });
+        } else {
+          // New Sukuk creation
+          setEditingId(null);
+          setFormData({
+            name: inheritedData?.description ? (inheritedData.description.startsWith('Sukuk:') ? inheritedData.description.replace(/^Sukuk:\s*/, '') : inheritedData.description) : '',
+            instrumentNo: '',
+            issuer: 'Bangladesh Bank',
+            rentRate: '',
+            tds: '10',
+            frequency: 'Semi-annual',
+            principalAmount: inheritedAmt,
+            issueDate: inheritedDate,
+            durationYears: '',
+            status: 'Active',
+            closingDate: '',
+            withdrawBalance: '',
+          });
+        }
+
+        setIsModalOpen(true);
+      }
+
       setTriggerAdd?.(false);
       onClearInheritedData?.();
     }
-  }, [triggerAdd, setTriggerAdd, inheritedData, onClearInheritedData]);
+  }, [triggerAdd, setTriggerAdd, inheritedData, onClearInheritedData, investments]);
 
   const getEffectiveStatus = (inv: Sukuk): OnlineInvestmentStatus => {
     // If explicitly marked as Matured in the DB, respect that first
@@ -386,28 +550,8 @@ const all = investments
   }, [investments]);
 
   const historyStats = useMemo(() => {
-    let startDate: Date;
-    let endDate = new Date();
     const now = new Date();
-
-    if (historyRange === 'all') {
-      startDate = new Date(0);
-    } else if (historyRange === 'last12m') {
-      startDate = new Date();
-      startDate.setFullYear(now.getFullYear() - 1);
-    } else if (historyRange === 'fiscal') {
-      const currentYear = now.getFullYear();
-      if (now.getMonth() >= 6) {
-        startDate = new Date(currentYear - 1, 6, 1);
-        endDate = new Date(currentYear, 5, 30);
-      } else {
-        startDate = new Date(currentYear - 2, 6, 1);
-        endDate = new Date(currentYear - 1, 5, 30);
-      }
-    } else {
-      startDate = historyCustomDates.start ? new Date(historyCustomDates.start) : new Date(0);
-      endDate = historyCustomDates.end ? new Date(historyCustomDates.end) : new Date();
-    }
+    const { start: startDate, end: endDate } = rangeDates;
 
     const startStr = startDate.toISOString().split('T')[0];
     const endStr = endDate.toISOString().split('T')[0];
@@ -517,7 +661,7 @@ const activeCount = activeSukuks.length;
       startStr, 
       endStr 
     };
-  }, [investments, historyRange, historyCustomDates]);
+  }, [investments, rangeDates]);
 
   // [CHANGE 3] Notify parent whenever active investment changes
   React.useEffect(() => {
@@ -527,46 +671,92 @@ const activeCount = activeSukuks.length;
   // Update Title with Range
   React.useEffect(() => {
     if (onTitleChange) {
-      if (historyRange === 'all') {
-        onTitleChange('Sukuk Funds');
-      } else {
-        const start = new Date(historyStats.startStr);
-        const end = new Date(historyStats.endStr);
-        const startStrFormatted = start.toLocaleString('default', { month: 'short', year: 'numeric' });
-        const endStrFormatted = end.toLocaleString('default', { month: 'short', year: 'numeric' });
-        onTitleChange(
-          <span className="flex items-center gap-2">
-            SUKUK FUNDS <span className="text-teal-400 font-display text-sm font-bold opacity-100 tracking-wider leading-none">/ {startStrFormatted} - {endStrFormatted}</span>
-          </span>
-        );
-      }
+      const { start, end } = rangeDates;
+      const startStrFormatted = start.toLocaleString('default', { month: 'short', year: 'numeric' });
+      const endStrFormatted = end.toLocaleString('default', { month: 'short', year: 'numeric' });
+      onTitleChange(
+        <span className="flex items-center gap-2">
+          SUKUK FUNDS <span className="text-teal-400 font-display text-sm font-bold opacity-100 tracking-wider leading-none">/ {startStrFormatted} - {endStrFormatted}</span>
+        </span>
+      );
     }
-  }, [historyStats, onTitleChange, historyRange]);
+  }, [rangeDates, onTitleChange]);
 
   const handleToggleInstallment = (invId: string, index: number) => {
     const inv = investments.find(i => i.id === invId);
     if (!inv) return;
 
     const newInstallments = [...inv.installments];
-    const isPaid = !newInstallments[index].isPaid;
-    
-    newInstallments[index] = { 
-      ...newInstallments[index], 
-      isPaid,
-      actualDate: isPaid ? (newInstallments[index].actualDate || newInstallments[index].date) : undefined,
-      actualAmount: isPaid ? (newInstallments[index].actualAmount || newInstallments[index].amount) : undefined,
-      isAutoMarked: isPaid,
-      isManuallyEdited: false
-    };
-    
-    const totalRepaid = newInstallments.reduce((sum, inst) => inst.isPaid ? sum + (inst.actualAmount || inst.amount) : sum, 0);
-    const newStatus = getEffectiveStatus({ ...inv, installments: newInstallments });
-    
-    onUpdate(invId, { 
-      installments: newInstallments,
-      totalRepaid,
-      status: newStatus
-    });
+    const currentlyPaid = !!newInstallments[index].isPaid;
+
+    if (!currentlyPaid) {
+      // Payment received: open Income & Expense New Ledger Entry modal with inherited date, category, amount, and narration
+      const actualDate = newInstallments[index].actualDate || newInstallments[index].date;
+      const actualAmount = newInstallments[index].actualAmount !== undefined && newInstallments[index].actualAmount !== null
+        ? newInstallments[index].actualAmount
+        : newInstallments[index].amount;
+      const linkedIncomeTxId = newInstallments[index].linkedIncomeTxId || crypto.randomUUID();
+
+      newInstallments[index] = { 
+        ...newInstallments[index], 
+        isPaid: true,
+        actualDate,
+        actualAmount,
+        linkedIncomeTxId,
+        isAutoMarked: false,
+        isManuallyEdited: true
+      };
+      
+      const totalRepaid = newInstallments.reduce((sum, inst) => inst.isPaid ? sum + (inst.actualAmount !== undefined ? inst.actualAmount : inst.amount) : sum, 0);
+      const newStatus = getEffectiveStatus({ ...inv, installments: newInstallments });
+      
+      onUpdate(invId, { 
+        installments: newInstallments,
+        totalRepaid,
+        status: newStatus
+      });
+
+      const sukukLabel = inv.name || inv.issuer || 'Sukuk';
+      const narration = `Sukuk Rent: ${sukukLabel} (Inst #${index + 1})`;
+
+      if (onNavigateToModule) {
+        onNavigateToModule('income-expense', {
+          date: actualDate,
+          amount: actualAmount,
+          type: 'Income',
+          category: 'Finance Income',
+          subCategory: 'Sukuk Rent',
+          description: narration,
+          linkedTxId: linkedIncomeTxId,
+          targetModule: 'sukuk-rent'
+        });
+      }
+    } else {
+      // Toggle unpaid & clean up linked income transaction
+      const prevLinkedTxId = newInstallments[index].linkedIncomeTxId;
+      newInstallments[index] = { 
+        ...newInstallments[index], 
+        isPaid: false,
+        actualDate: undefined,
+        actualAmount: undefined,
+        linkedIncomeTxId: undefined,
+        isAutoMarked: false,
+        isManuallyEdited: false
+      };
+      
+      const totalRepaid = newInstallments.reduce((sum, inst) => inst.isPaid ? sum + (inst.actualAmount !== undefined ? inst.actualAmount : inst.amount) : sum, 0);
+      const newStatus = getEffectiveStatus({ ...inv, installments: newInstallments });
+      
+      onUpdate(invId, { 
+        installments: newInstallments,
+        totalRepaid,
+        status: newStatus
+      });
+
+      if (prevLinkedTxId && onDeleteLinkedIncomeTx) {
+        onDeleteLinkedIncomeTx(prevLinkedTxId);
+      }
+    }
   };
 
   const handleSaveCustomRepayment = (invId: string, index: number) => {
@@ -575,6 +765,7 @@ const activeCount = activeSukuks.length;
 
     const actualAmount = parseFloat(customRepaymentData.amount) || 0;
     const actualDate = customRepaymentData.date;
+    const linkedIncomeTxId = inv.installments[index]?.linkedIncomeTxId || crypto.randomUUID();
 
     const newInstallments = [...inv.installments];
     newInstallments[index] = { 
@@ -582,11 +773,12 @@ const activeCount = activeSukuks.length;
       isPaid: true,
       actualDate,
       actualAmount,
+      linkedIncomeTxId,
       isAutoMarked: false,
       isManuallyEdited: true
     };
     
-    const totalRepaid = newInstallments.reduce((sum, inst) => inst.isPaid ? sum + (inst.actualAmount || inst.amount) : sum, 0);
+    const totalRepaid = newInstallments.reduce((sum, inst) => inst.isPaid ? sum + (inst.actualAmount !== undefined ? inst.actualAmount : inst.amount) : sum, 0);
     const newStatus = getEffectiveStatus({ ...inv, installments: newInstallments });
     
     onUpdate(invId, { 
@@ -594,6 +786,18 @@ const activeCount = activeSukuks.length;
       totalRepaid,
       status: newStatus
     });
+
+    const sukukLabel = inv.name || inv.issuer || 'Sukuk';
+    const narration = `Sukuk Rent: ${sukukLabel} (Inst #${index + 1})`;
+
+    if (onUpdateLinkedIncomeTx && linkedIncomeTxId) {
+      onUpdateLinkedIncomeTx(linkedIncomeTxId, {
+        date: actualDate,
+        amount: actualAmount,
+        description: narration
+      });
+    }
+
     setCustomRepaymentIdx(null);
   };
 
@@ -623,52 +827,115 @@ const activeCount = activeSukuks.length;
     const inv = investments.find(i => i.id === id);
     if (!inv) return;
 
+    const instCount = inv.installments?.length || 0;
+    const paidCount = inv.installments?.filter(i => i.isPaid).length || 0;
+    const hasDependents = instCount > 0 || !!inv.linkedIeGroupId;
+
     setConfirmState({
       isOpen: true,
-      title: 'Confirm Delete',
-      message: `Are you sure you want to delete the Sukuk investment "${inv.name}"?`,
+      title: hasDependents ? 'Severe Warning: Deleting Main Investment & All Dependents' : 'Confirm Delete',
+      message: hasDependents
+        ? `You are about to delete the main Sukuk investment "${inv.name}". This will permanently delete the investment and ALL ${instCount} dependent rental installments (${paidCount} paid), historical profit records, and linked ledger entries.`
+        : `Are you sure you want to delete the Sukuk investment "${inv.name}"?`,
+      variant: hasDependents ? 'severe' : 'danger',
+      confirmLabel: hasDependents ? 'Delete Investment & All Dependents' : 'Delete',
+      details: hasDependents ? [
+        `Main Sukuk Investment Record: "${inv.name}" (${inv.instrumentNo || 'N/A'})`,
+        `${instCount} Scheduled / Paid Rental Installment Records (${paidCount} completed payments)`,
+        inv.linkedIeGroupId ? 'Linked initial investment transfer in Income & Expense ledger' : null,
+        inv.installments?.some(i => i.linkedIncomeTxId) ? 'Linked profit / rent income transactions in Income & Expense ledger' : null
+      ] : undefined,
       onConfirm: () => {
         closeConfirm();
         onDelete(id);
+        if (inv.linkedIeGroupId && onDeleteLinkedTransfer) {
+          onDeleteLinkedTransfer(inv.linkedIeGroupId);
+        }
+        inv.installments?.forEach(inst => {
+          if (inst.linkedIncomeTxId && onDeleteLinkedIncomeTx) {
+            onDeleteLinkedIncomeTx(inst.linkedIncomeTxId);
+          }
+        });
         setActiveMenuId(null);
-        showNotification('success', 'Investment deleted successfully');
+        showNotification('success', 'Investment and all dependent entries deleted successfully');
       },
       onCancel: closeConfirm,
     });
   };
 
-const handleBatchDelete = () => {
+  const handleBatchDelete = () => {
     if (selectedIds.length === 0) return;
+
+    const selectedInvs = investments.filter(i => selectedIds.includes(i.id));
+    const totalInstallments = selectedInvs.reduce((acc, i) => acc + (i.installments?.length || 0), 0);
+    const totalPaid = selectedInvs.reduce((acc, i) => acc + (i.installments?.filter(inst => inst.isPaid).length || 0), 0);
+    const hasDependents = totalInstallments > 0 || selectedInvs.some(i => i.linkedIeGroupId);
 
     setConfirmState({
       isOpen: true,
-      title: 'Confirm Batch Delete',
-      message: `Are you sure you want to delete ${selectedIds.length} selected Sukuk investments?`,
+      title: hasDependents ? 'Severe Warning: Batch Deleting Main Investments & All Dependents' : 'Confirm Batch Delete',
+      message: hasDependents
+        ? `Your selection contains ${selectedIds.length} main Sukuk investment(s). Deleting will permanently delete all selected investments and ALL ${totalInstallments} dependent rental installments (${totalPaid} paid), repayment records, and linked ledger entries.`
+        : `Are you sure you want to delete ${selectedIds.length} selected Sukuk investments?`,
+      variant: hasDependents ? 'severe' : 'danger',
+      confirmLabel: hasDependents ? `Delete All (${selectedIds.length} Items & Dependents)` : 'Delete Selected',
+      details: hasDependents ? [
+        `${selectedIds.length} Main Sukuk Investment Entries (${selectedInvs.map(i => i.name).slice(0, 3).join(', ')}${selectedInvs.length > 3 ? '...' : ''})`,
+        `${totalInstallments} Dependent Rental Installment Records (${totalPaid} completed payouts)`,
+        'All associated linked transfers and rent income entries in Income & Expense ledger'
+      ] : undefined,
       onConfirm: () => {
         closeConfirm();
+        investments.filter(i => selectedIds.includes(i.id)).forEach(i => {
+          if (i.linkedIeGroupId && onDeleteLinkedTransfer) {
+            onDeleteLinkedTransfer(i.linkedIeGroupId);
+          }
+          i.installments?.forEach(inst => {
+            if (inst.linkedIncomeTxId && onDeleteLinkedIncomeTx) {
+              onDeleteLinkedIncomeTx(inst.linkedIncomeTxId);
+            }
+          });
+        });
         onBatchDelete(selectedIds);
         setSelectedIds([]);
-        showNotification('success', `Successfully deleted ${selectedIds.length} investments.`);
+        showNotification('success', `Successfully deleted ${selectedIds.length} investments and all dependent entries.`);
       },
       onCancel: closeConfirm,
     });
   };
 
-  const toggleSelectAll = () => {
-  if (selectedIds.length === filtered.length && filtered.length > 0) {
-    setSelectedIds([]);
-  } else {
-    setSelectedIds(filtered.map(i => i.id));
-  }
-};
+  const [lastSelectedId, setLastSelectedId] = useState<string | null>(null);
 
-const toggleSelect = (id: string) => {
-  if (selectedIds.includes(id)) {
-    setSelectedIds(selectedIds.filter(i => i !== id));
-  } else {
-    setSelectedIds([...selectedIds, id]);
-  }
-};
+  const toggleSelectAll = () => {
+    if (selectedIds.length === filtered.length && filtered.length > 0) {
+      setSelectedIds([]);
+      setLastSelectedId(null);
+    } else {
+      setSelectedIds(filtered.map(i => i.id));
+    }
+  };
+
+  const toggleSelect = (id: string, e?: React.MouseEvent) => {
+    if (e?.shiftKey && lastSelectedId && lastSelectedId !== id) {
+      const lastIdx = filtered.findIndex(i => i.id === lastSelectedId);
+      const currIdx = filtered.findIndex(i => i.id === id);
+      if (lastIdx !== -1 && currIdx !== -1) {
+        const start = Math.min(lastIdx, currIdx);
+        const end = Math.max(lastIdx, currIdx);
+        const rangeIds = filtered.slice(start, end + 1).map(i => i.id);
+        setSelectedIds(prev => Array.from(new Set([...prev, ...rangeIds])));
+        setLastSelectedId(id);
+        return;
+      }
+    }
+
+    setLastSelectedId(id);
+    if (selectedIds.includes(id)) {
+      setSelectedIds(selectedIds.filter(i => i !== id));
+    } else {
+      setSelectedIds([...selectedIds, id]);
+    }
+  };
 
   // Compute the default withdraw balance when principalAmount changes and status is Matured
   const handleFormChange = (field: string, value: string) => {
@@ -726,37 +993,43 @@ const toggleSelect = (id: string) => {
       });
     }
 
-    // AFTER
-// When editing, preserve existing installments and totalRepaid so paid
-// history and Total Profit are never wiped. Only regenerate installments
-// for brand-new entries.
-const existingInv = editingId ? investments.find(i => i.id === editingId) : null;
+    // When editing, preserve existing installments and totalRepaid so paid
+    // history and Total Profit are never wiped. Only regenerate installments
+    // for brand-new entries.
+    const isExternalCreate = !editingId && isFromExternalModuleRef.current;
+    const existingInv = editingId ? investments.find(i => i.id === editingId) : null;
+    const linkGroupId: string | undefined = editingId
+      ? (existingInv?.linkedIeGroupId || inheritedIeGroupId)
+      : (isExternalCreate ? inheritedIeGroupId : crypto.randomUUID());
 
-const finalInstallments = existingInv
-  ? existingInv.installments   // keep all paid/unpaid state intact
-  : installments;              // fresh generation only for new entries
+    const finalInstallments = existingInv
+      ? existingInv.installments   // keep all paid/unpaid state intact
+      : installments;              // fresh generation only for new entries
 
-const finalTotalRepaid = existingInv
-  ? existingInv.totalRepaid    // never recalculate from scratch on edit
-  : 0;
+    const finalTotalRepaid = existingInv
+      ? existingInv.totalRepaid    // never recalculate from scratch on edit
+      : 0;
 
-const payload: any = {
-  name: formData.name,
-  investmentDate: formData.issueDate,
-  amount: principalAmount,
-  currency: 'BDT' as const,
-  instrumentNo: formData.instrumentNo,
-  issuer: formData.issuer,
-  rentRate,
-  tds,
-  frequency: formData.frequency,
-  principalAmount,
-  issueDate: formData.issueDate,
-  durationYears,
-  status: formData.status,
-  installments: finalInstallments,
-  totalRepaid: finalTotalRepaid,
-};
+    const sukukDisplayName = formData.name ? formData.name : (formData.issuer ? `Sukuk: ${formData.issuer}` : 'Sukuk');
+
+    const payload: any = {
+      name: formData.name,
+      investmentDate: formData.issueDate,
+      amount: principalAmount,
+      currency: 'BDT' as const,
+      instrumentNo: formData.instrumentNo,
+      issuer: formData.issuer,
+      rentRate,
+      tds,
+      frequency: formData.frequency,
+      principalAmount,
+      issueDate: formData.issueDate,
+      durationYears,
+      status: formData.status,
+      installments: finalInstallments,
+      totalRepaid: finalTotalRepaid,
+      linkedIeGroupId: linkGroupId,
+    };
 
     if (formData.status === 'Matured') {
       payload.closingDate = formData.closingDate;
@@ -766,21 +1039,33 @@ const payload: any = {
 
     if (editingId) {
       onUpdate(editingId, payload);
+      if (linkGroupId && onUpdateLinkedTransfer) {
+        onUpdateLinkedTransfer(linkGroupId, {
+          date: payload.issueDate,
+          amount: payload.principalAmount,
+          description: sukukDisplayName
+        });
+      }
     } else {
       onAdd(payload);
-      if (onNavigateToModule) {
+      if (isExternalCreate) {
+        isFromExternalModuleRef.current = false;
+        setInheritedIeGroupId(undefined);
+      } else if (onNavigateToModule) {
         onNavigateToModule('income-expense', {
           date: payload.issueDate,
           amount: payload.principalAmount,
           type: 'Transfer',
           targetModule: 'sukuk',
-          description: `Sukuk: ${payload.name || payload.issuer}`.trim()
+          description: sukukDisplayName,
+          linkedTxId: linkGroupId
         });
       }
     }
 
     setIsModalOpen(false);
     setEditingId(null);
+    checkAndReturnToModule();
     setFormData({
       name: '',
       instrumentNo: '',
@@ -797,223 +1082,314 @@ const payload: any = {
     });
   };
 
+  const handleRentSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const inv = investments.find(i => i.id === selectedRentSukukId);
+    if (!inv) return;
+
+    const actualAmount = parseFloat(rentFormData.amount) || 0;
+    const actualDate = rentFormData.date;
+    const linkedTxId = inheritedIncomeTxId || inv.installments[selectedRentInstIdx]?.linkedIncomeTxId || crypto.randomUUID();
+
+    const newInstallments = [...inv.installments];
+    if (newInstallments[selectedRentInstIdx]) {
+      newInstallments[selectedRentInstIdx] = {
+        ...newInstallments[selectedRentInstIdx],
+        isPaid: true,
+        actualDate,
+        actualAmount,
+        linkedIncomeTxId: linkedTxId,
+        isAutoMarked: false,
+        isManuallyEdited: true
+      };
+    }
+
+    const totalRepaid = newInstallments.reduce((sum, inst) => inst.isPaid ? sum + (inst.actualAmount !== undefined ? inst.actualAmount : inst.amount) : sum, 0);
+    const newStatus = getEffectiveStatus({ ...inv, installments: newInstallments });
+
+    onUpdate(inv.id, {
+      installments: newInstallments,
+      totalRepaid,
+      status: newStatus
+    });
+
+    const sukukLabel = inv.name || inv.issuer || 'Sukuk';
+    const narration = `Sukuk Rent: ${sukukLabel} (Inst #${selectedRentInstIdx + 1})`;
+
+    if (isFromExternalModuleRef.current) {
+      isFromExternalModuleRef.current = false;
+      setInheritedIncomeTxId(undefined);
+    } else {
+      if (onNavigateToModule) {
+        onNavigateToModule('income-expense', {
+          date: actualDate,
+          amount: actualAmount,
+          type: 'Income',
+          category: 'Finance Income',
+          subCategory: 'Sukuk Rent',
+          description: narration,
+          linkedTxId,
+          targetModule: 'sukuk-rent'
+        });
+      }
+    }
+
+    setIsRentModalOpen(false);
+    showNotification('success', 'Sukuk rent recorded successfully!');
+    checkAndReturnToModule();
+  };
+
   return (
     <div className="space-y-8">
 
+      {/* Date Range Selector — same UI/behavior as Mutual Funds */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/50 border border-slate-800 rounded-xl p-2 relative">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 w-full sm:w-auto">
+          <div className="flex items-center justify-between w-full sm:w-auto gap-2">
+            <div className="relative flex-1 sm:flex-none">
+              {/* Mobile View: Dropdown */}
+              <div className="block sm:hidden">
+                <button
+                  onClick={() => setIsRangeMenuOpen(!isRangeMenuOpen)}
+                  className="flex items-center justify-between gap-4 bg-slate-950 border border-slate-800 rounded-lg px-4 h-9 text-[10px] font-bold text-slate-300 hover:text-white transition-all uppercase w-full"
+                >
+                  <div className="flex items-center gap-2">
+                    <Calendar size={14} className="text-teal-400" />
+                    {historyRange === 'this'
+                      ? 'This month'
+                      : historyRange === 'fiscal'
+                        ? 'Fiscal'
+                        : 'Custom'}
+                  </div>
+                  <ChevronDown
+                    size={14}
+                    className={cn(
+                      "text-slate-500 transition-transform",
+                      isRangeMenuOpen ? "rotate-180 text-teal-400" : ""
+                    )}
+                  />
+                </button>
 
-{/* Date Range Selector */}
-<div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/50 border border-slate-800 rounded-xl p-2 relative">
-  
-  <div className="flex flex-col sm:flex-row sm:items-center gap-3 w-full sm:w-auto">
-    
-    {/* LINE 1 (Mobile): Range + Settings */}
-    <div className="flex items-center justify-between w-full sm:w-auto gap-2">
+                {isRangeMenuOpen && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setIsRangeMenuOpen(false)}
+                    />
+                    <div className="absolute left-0 mt-2 w-full bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95">
+                      {(['this', 'fiscal', 'custom'] as const).map(id => (
+                        <button
+                          key={id}
+                          onClick={() => {
+                            handleRangeChange(id);
+                            setIsRangeMenuOpen(false);
+                          }}
+                          className={cn(
+                            "w-full text-left px-3 py-2 text-[10px] font-bold rounded-lg transition-colors uppercase",
+                            historyRange === id
+                              ? "bg-teal-400 text-slate-950"
+                              : "text-slate-300 hover:bg-slate-800"
+                          )}
+                        >
+                          {id === 'this'
+                            ? 'This month'
+                            : id === 'fiscal'
+                              ? 'Fiscal'
+                              : 'Custom'}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
 
-      {/* Range Selection */}
-      <div className="relative flex-1 sm:flex-none">
-
-        {/* Mobile Dropdown */}
-        <div className="block sm:hidden">
-          <button 
-            onClick={() => setIsHistoryMenuOpen(!isHistoryMenuOpen)}
-            className="flex items-center justify-between gap-4 bg-slate-950 border border-slate-800 rounded-lg px-4 h-9 text-[10px] font-bold text-slate-300 hover:text-white transition-all uppercase w-full"
-          >
-            <div className="flex items-center gap-2">
-              <Calendar size={14} className="text-teal-400" />
-              {historyRange === 'all' ? 'Overall' : 
-               historyRange === 'last12m' ? 'Last 12M' : 
-               historyRange === 'fiscal' ? 'Fiscal' : 'Custom'}
-            </div>
-
-            <ChevronDown 
-              size={14} 
-              className={cn(
-                "text-slate-500 transition-transform",
-                isHistoryMenuOpen ? "rotate-180 text-teal-400" : ""
-              )} 
-            />
-          </button>
-
-          {isHistoryMenuOpen && (
-            <>
-              <div className="fixed inset-0 z-40" onClick={() => setIsHistoryMenuOpen(false)} />
-              <div className="absolute left-0 mt-2 w-full bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95 backdrop-blur-md">
-                {['all','last12m','fiscal','custom'].map((id) => (
+              {/* Desktop View: Tabs */}
+              <div className="hidden sm:flex items-center bg-slate-950/50 rounded-lg p-1 border border-slate-800/50 gap-1 font-sans">
+                {(['this', 'fiscal', 'custom'] as const).map(id => (
                   <button
                     key={id}
-                    onClick={() => {
-                      setHistoryRange(id as any);
-                      setIsHistoryMenuOpen(false);
-                    }}
+                    onClick={() => handleRangeChange(id)}
                     className={cn(
-                      "w-full text-left px-3 py-2 text-[10px] font-bold rounded-lg transition-colors uppercase",
-                      historyRange === id 
-                        ? "bg-teal-400 text-slate-950" 
-                        : "text-slate-300 hover:bg-slate-800"
+                      "px-4 py-1.5 rounded-md text-[10px] font-bold uppercase transition-all border",
+                      historyRange === id
+                        ? "bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/20"
+                        : "bg-slate-900/40 border-slate-800/40 text-slate-300 hover:text-white"
                     )}
                   >
-                    {id === 'all' ? 'Overall' : 
-                     id === 'last12m' ? 'Last 12M' : 
-                     id === 'fiscal' ? 'Fiscal' : 'Custom'}
+                    {id === 'this'
+                      ? 'This month'
+                      : id === 'fiscal'
+                        ? 'Fiscal'
+                        : 'Custom'}
                   </button>
                 ))}
               </div>
-            </>
-          )}
-        </div>
+            </div>
 
-        {/* Desktop Tabs */}
-        <div className="hidden sm:flex items-center bg-slate-950/50 rounded-lg p-1 border border-slate-800/50 gap-1">
-          {['all','last12m','fiscal','custom'].map(id => (
+            {/* Settings Button - Mobile Only */}
+            <div className="block sm:hidden">
+              <div className="relative">
+                <button 
+                  onClick={() => setIsSettingsMenuOpen(!isSettingsMenuOpen)}
+                  className="flex items-center justify-center gap-2 px-3 sm:px-4 py-2 rounded-md text-[10px] font-bold uppercase transition-all whitespace-nowrap bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/10 hover:bg-teal-300 hover:shadow-teal-400/20"
+                >
+                  <Settings size={14} />
+                  <ChevronDown size={14} className={cn("opacity-50 transition-transform", isSettingsMenuOpen ? "rotate-180" : "")} />
+                </button>
+
+                {isSettingsMenuOpen && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setIsSettingsMenuOpen(false)} />
+                    <div className="absolute right-0 mt-2 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-2 animate-in fade-in zoom-in-95 backdrop-blur-xl transition-all">
+                      <button 
+                        onClick={() => { exportData(); setIsSettingsMenuOpen(false); }}
+                        className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
+                      >
+                        <Download size={14} className="text-teal-400" />
+                        EXPORT
+                      </button>
+                      <label className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase cursor-pointer">
+                        <Upload size={14} className="text-teal-400" />
+                        IMPORT
+                        <input type="file" className="hidden" accept=".xlsx,.xls" onChange={importData} />
+                      </label>
+                      <button 
+                        onClick={() => { alert('Template not implemented'); setIsSettingsMenuOpen(false); }}
+                        className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
+                      >
+                        <FileSpreadsheet size={14} className="text-teal-400" />
+                        TEMPLATE
+                      </button>
+                      <div className="h-px bg-slate-800/60 my-2" />
+                      <button 
+                        onClick={() => { setIsModalOpen(true); setIsSettingsMenuOpen(false); }}
+                        className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-teal-400 hover:bg-teal-400/10 rounded-lg transition-colors uppercase"
+                      >
+                        <Plus size={14} />
+                        Add Sukuk
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Date Browsing Controls */}
+          <div className="flex items-center gap-1.5 px-1 animate-in fade-in duration-300">
             <button
-              key={id}
-              onClick={() => handleRangeChange(id as any)}
-              className={cn(
-                "px-4 py-1.5 rounded-md text-[10px] font-bold uppercase transition-all border",
-                historyRange === id 
-                  ? "bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/20" 
-                  : "bg-slate-900/40 border-slate-800/40 text-slate-300 hover:text-white"
-              )}
+              onClick={() => {
+                if (historyRange === 'this') {
+                  navigateHistoryThisMonth(-1);
+                } else if (historyRange === 'fiscal') {
+                  setHistoryFiscalStartYear(prev => prev - 1);
+                } else {
+                  navigateHistoryCustomMonth(-1);
+                }
+              }}
+              className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
             >
-              {id === 'all' ? 'Overall' : 
-               id === 'last12m' ? 'Last 12M' : 
-               id === 'fiscal' ? 'Fiscal' : 'Custom'}
+              <ChevronLeft size={14} />
             </button>
-          ))}
-        </div>
-      </div>
 
-      {/* Settings Button - Mobile */}
-      <div className="block sm:hidden">
-        <div className="relative">
+            {historyRange === 'custom' ? (
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="date"
+                  value={historyCustomDates.start}
+                  onChange={e => setHistoryCustomDates(prev => ({
+                    ...prev,
+                    start: e.target.value
+                  }))}
+                  className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none uppercase cursor-pointer"
+                />
+                <span className="text-slate-700 font-bold text-[10px]">–</span>
+                <input
+                  type="date"
+                  value={historyCustomDates.end}
+                  onChange={e => setHistoryCustomDates(prev => ({
+                    ...prev,
+                    end: e.target.value
+                  }))}
+                  className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none uppercase cursor-pointer"
+                />
+              </div>
+            ) : historyRange === 'fiscal' ? (
+              <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-[10px] font-bold text-white uppercase select-none tracking-wider whitespace-nowrap min-w-[160px] text-center">
+                July {historyFiscalStartYear} - June {historyFiscalStartYear + 1}
+              </div>
+            ) : (
+              <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-[10px] font-bold text-teal-400 uppercase select-none tracking-wider whitespace-nowrap min-w-[120px] text-center">
+                {formatHistoryThisMonthLabel(historyThisMonthDate)}
+              </div>
+            )}
+
+            <button
+              onClick={() => {
+                if (historyRange === 'this') {
+                  navigateHistoryThisMonth(1);
+                } else if (historyRange === 'fiscal') {
+                  setHistoryFiscalStartYear(prev => prev + 1);
+                } else {
+                  navigateHistoryCustomMonth(1);
+                }
+              }}
+              className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              <ChevronRight size={14} />
+            </button>
+          </div>
+        </div>
+
+        {/* Settings Button - Desktop Only */}
+        <div className="hidden sm:block relative">
           <button 
             onClick={() => setIsSettingsMenuOpen(!isSettingsMenuOpen)}
             className="flex items-center justify-center gap-2 px-3 sm:px-4 py-2 rounded-md text-[10px] font-bold uppercase transition-all whitespace-nowrap bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/10 hover:bg-teal-300 hover:shadow-teal-400/20"
           >
             <Settings size={14} />
+            <span className="hidden sm:inline">Settings</span>
             <ChevronDown size={14} className={cn("opacity-50 transition-transform", isSettingsMenuOpen ? "rotate-180" : "")} />
           </button>
 
           {isSettingsMenuOpen && (
             <>
               <div className="fixed inset-0 z-40" onClick={() => setIsSettingsMenuOpen(false)} />
-              <div className="absolute right-0 mt-2 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-2 animate-in fade-in zoom-in-95 backdrop-blur-xl transition-all">
+              <div className="absolute right-0 mt-2 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-2 backdrop-blur-xl">
                 <button 
-                  onClick={() => { exportData(); setIsSettingsMenuOpen(false); }}
-                  className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
-                >
-                  <Download size={14} className="text-teal-400" />
-                  EXPORT
-                </button>
-                <label className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase cursor-pointer">
-                  <Upload size={14} className="text-teal-400" />
-                  IMPORT
-                  <input type="file" className="hidden" accept=".xlsx,.xls" onChange={importData} />
-                </label>
-                <button 
-                  onClick={() => { alert('Template not implemented'); setIsSettingsMenuOpen(false); }}
-                  className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
-                >
-                  <FileSpreadsheet size={14} className="text-teal-400" />
-                  TEMPLATE
-                </button>
-                <div className="h-px bg-slate-800/60 my-2" />
-                <button 
-                  onClick={() => { setIsModalOpen(true); setIsSettingsMenuOpen(false); }}
-                  className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-teal-400 hover:bg-teal-400/10 rounded-lg transition-colors uppercase"
-                >
-                  <Plus size={14} />
-                  Add Sukuk
-                </button>
+                    onClick={() => { exportData(); setIsSettingsMenuOpen(false); }}
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
+                  >
+                    <Download size={14} className="text-teal-400" />
+                    EXPORT
+                  </button>
+                  <label className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase cursor-pointer">
+                    <Upload size={14} className="text-teal-400" />
+                    IMPORT
+                    <input type="file" className="hidden" accept=".xlsx,.xls" onChange={importData} />
+                  </label>
+                  <button 
+                    onClick={() => { alert('Template not implemented'); setIsSettingsMenuOpen(false); }}
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
+                  >
+                    <FileSpreadsheet size={14} className="text-teal-400" />
+                    TEMPLATE
+                  </button>
+
+                  <div className="h-px bg-slate-800/60 my-2" />
+
+                  <button 
+                    onClick={() => { setIsModalOpen(true); setIsSettingsMenuOpen(false); }}
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-teal-400 hover:bg-teal-400/10 rounded-lg transition-colors uppercase"
+                  >
+                    <Plus size={14} />
+                    Add Sukuk
+                  </button>
               </div>
             </>
           )}
         </div>
       </div>
-    </div>
-
-    {/* LINE 2 (Mobile): Custom Dates */}
-    {historyRange === 'custom' && (
-      <div className="flex items-center justify-center sm:justify-start gap-1.5 px-1 animate-in fade-in slide-in-from-top-2 sm:slide-in-from-left-2 duration-300 w-full sm:w-auto">
-        
-        <button onClick={() => navigateCustomMonth(-1)} className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400">
-          <ChevronLeft size={14} />
-        </button>
-
-        <input
-          type="date"
-          value={historyCustomDates.start}
-          onChange={(e) => setHistoryCustomDates(prev => ({ ...prev, start: e.target.value }))}
-          className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none focus:border-teal-400/50 uppercase flex-1 sm:flex-none"
-        />
-
-        <span className="text-slate-700 text-[10px] font-bold">–</span>
-
-        <input
-          type="date"
-          value={historyCustomDates.end}
-          onChange={(e) => setHistoryCustomDates(prev => ({ ...prev, end: e.target.value }))}
-          className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none focus:border-teal-400/50 uppercase flex-1 sm:flex-none"
-        />
-
-        <button onClick={() => navigateCustomMonth(1)} className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400">
-          <ChevronRight size={14} />
-        </button>
-      </div>
-    )}
-  </div>
-
-  {/* Settings Button - Desktop */}
-  <div className="hidden sm:block relative">
-    <button 
-      onClick={() => setIsSettingsMenuOpen(!isSettingsMenuOpen)}
-      className="flex items-center justify-center gap-2 px-3 sm:px-4 py-2 rounded-md text-[10px] font-bold uppercase transition-all whitespace-nowrap bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/10 hover:bg-teal-300 hover:shadow-teal-400/20"
-    >
-      <Settings size={14} />
-      <span className="hidden sm:inline">Settings</span>
-      <ChevronDown size={14} className={cn("opacity-50 transition-transform", isSettingsMenuOpen ? "rotate-180" : "")} />
-    </button>
-
-    {isSettingsMenuOpen && (
-      <>
-        <div className="fixed inset-0 z-40" onClick={() => setIsSettingsMenuOpen(false)} />
-        <div className="absolute right-0 mt-2 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-2 backdrop-blur-xl">
-          
-          <button 
-              onClick={() => { exportData(); setIsSettingsMenuOpen(false); }}
-              className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
-            >
-              <Download size={14} className="text-teal-400" />
-              EXPORT
-            </button>
-            <label className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase cursor-pointer">
-              <Upload size={14} className="text-teal-400" />
-              IMPORT
-              <input type="file" className="hidden" accept=".xlsx,.xls" onChange={importData} />
-            </label>
-            <button 
-              onClick={() => { alert('Template not implemented'); setIsSettingsMenuOpen(false); }}
-              className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-slate-300 hover:bg-slate-800 hover:text-white rounded-lg transition-colors uppercase"
-            >
-              <FileSpreadsheet size={14} className="text-teal-400" />
-              TEMPLATE
-            </button>
-
-            <div className="h-px bg-slate-800/60 my-2" />
-
-            <button 
-              onClick={() => { setIsModalOpen(true); setIsSettingsMenuOpen(false); }}
-              className="w-full flex items-center gap-2 px-3 py-1.5 text-label font-bold text-teal-400 hover:bg-teal-400/10 rounded-lg transition-colors uppercase"
-            >
-              <Plus size={14} />
-              Add Sukuk
-            </button>
-
-        </div>
-      </>
-    )}
-  </div>
-</div>
 
       {notification && (
         <div className={cn(
@@ -1240,7 +1616,7 @@ const payload: any = {
                 <div className="flex items-center gap-3">
                   <Checkbox 
                     checked={selectedIds.includes(inv.id)}
-                    onChange={() => toggleSelect(inv.id)}
+                    onChange={(_, e) => toggleSelect(inv.id, e)}
                   />
                   <div className={cn("w-2 h-2 rounded-full animate-pulse", isMatured ? 'bg-slate-500' : 'bg-teal-400')} />
                   {/* [CHANGE 1] Title bar: sukuk name + "(Matured)" label in red if matured */}
@@ -1433,8 +1809,11 @@ const payload: any = {
         onClose={() => {
           setIsModalOpen(false);
           setEditingId(null);
+          isFromExternalModuleRef.current = false;
+          setInheritedIeGroupId(undefined);
+          checkAndReturnToModule();
         }} 
-        title={editingId ? "Edit Sukuk" : "Add New Sukuk"}
+        title={editingId ? "Edit Sukuk Fund" : "Add Sukuk Fund"}
       >
         <form onSubmit={handleSubmit} className="space-y-4">
           {formError && (
@@ -1573,12 +1952,117 @@ const payload: any = {
           )}
 
           <div className="pt-2 flex gap-3">
-            <Button type="button" variant="secondary" className="flex-1 py-2" onClick={() => setIsModalOpen(false)}>
+            <Button
+              type="button"
+              variant="secondary"
+              className="flex-1 py-2"
+              onClick={() => {
+                setIsModalOpen(false);
+                setEditingId(null);
+                isFromExternalModuleRef.current = false;
+                setInheritedIeGroupId(undefined);
+                checkAndReturnToModule();
+              }}
+            >
               Cancel
             </Button>
             <Button type="submit" className="flex-1 py-2">
-              {editingId ? "Update Sukuk" : "Save Sukuk"}
+              {editingId ? "Update Sukuk" : "Create Sukuk"}
             </Button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Sukuk Rent Payment Confirmation Modal */}
+      <Modal
+        isOpen={isRentModalOpen}
+        onClose={() => {
+          setIsRentModalOpen(false);
+          isFromExternalModuleRef.current = false;
+          setInheritedIncomeTxId(undefined);
+          checkAndReturnToModule();
+        }}
+        title="Confirm Sukuk Rent Payment"
+      >
+        <form onSubmit={handleRentSubmit} className="space-y-4">
+          <Select
+            label="Sukuk Investment"
+            value={selectedRentSukukId}
+            options={investments.map(inv => ({
+              label: `${inv.name || inv.issuer || 'Sukuk'} (${inv.instrumentNo || 'No Inst. No'})`,
+              value: inv.id
+            }))}
+            onChange={(val) => {
+              setSelectedRentSukukId(val);
+              const matched = investments.find(i => i.id === val);
+              if (matched) {
+                const firstUnpaid = matched.installments.findIndex(i => !i.isPaid);
+                const nextIdx = firstUnpaid >= 0 ? firstUnpaid : 0;
+                setSelectedRentInstIdx(nextIdx);
+                if (matched.installments[nextIdx] && !rentFormData.amount) {
+                  setRentFormData(prev => ({ ...prev, amount: String(matched.installments[nextIdx].amount) }));
+                }
+              }
+            }}
+            required
+          />
+
+          {selectedRentSukukId && (
+            <Select
+              label="Installment"
+              value={String(selectedRentInstIdx)}
+              options={(investments.find(i => i.id === selectedRentSukukId)?.installments || []).map((inst, idx) => ({
+                label: `Inst #${idx + 1} - Due ${inst.date} (${inst.amount.toLocaleString()} BDT)${inst.isPaid ? ' [Paid]' : ''}`,
+                value: String(idx)
+              }))}
+              onChange={(val) => {
+                const idx = parseInt(val, 10);
+                setSelectedRentInstIdx(idx);
+                const matched = investments.find(i => i.id === selectedRentSukukId);
+                if (matched?.installments[idx]) {
+                  setRentFormData(prev => ({
+                    ...prev,
+                    amount: String(matched.installments[idx].actualAmount || matched.installments[idx].amount),
+                    date: prev.date || matched.installments[idx].date
+                  }));
+                }
+              }}
+              required
+            />
+          )}
+
+          <div className="grid grid-cols-2 gap-3">
+            <Input
+              label="Payment Date"
+              type="date"
+              value={rentFormData.date}
+              onChange={(e) => setRentFormData({ ...rentFormData, date: e.target.value })}
+              required
+            />
+            <Input
+              label="Rent Amount (BDT)"
+              type="number"
+              step="0.01"
+              value={rentFormData.amount}
+              onChange={(e) => setRentFormData({ ...rentFormData, amount: e.target.value })}
+              required
+            />
+          </div>
+
+          <div className="flex justify-end gap-3 pt-4 border-t border-slate-800">
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => {
+                setIsRentModalOpen(false);
+                isFromExternalModuleRef.current = false;
+                setInheritedIncomeTxId(undefined);
+                checkAndReturnToModule();
+              }}
+            >
+              Cancel
+            </Button>
+            <Button type="submit">Confirm Rent</Button>
           </div>
         </form>
       </Modal>

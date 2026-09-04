@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Card, Button, Modal, Input, Checkbox, Select } from '../ui/BaseComponents';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { FDR, FDRTransaction, Currency } from '../../types';
@@ -13,6 +13,7 @@ import { Plus, MoreVertical, Calendar, TrendingUp, Search, CheckCircle2, Briefca
 
 interface FixedDepositsModuleProps {
   investments: FDR[];
+  conversionRates?: { USD_to_BDT: number; LYD_to_BDT: number };
   onAdd: (investment: Omit<FDR, 'id'>) => void;
   onUpdate: (id: string, updates: Partial<FDR>) => void;
   onDelete: (id: string) => void;
@@ -22,9 +23,12 @@ interface FixedDepositsModuleProps {
   triggerAdd?: boolean;
   setTriggerAdd?: (val: boolean) => void;
   onTitleChange?: (title: React.ReactNode) => void;
-  inheritedData?: { date: string; amount: number; type?: 'Transfer' | 'Income' | 'Expense' | 'Loan'; targetModule?: string; description?: string } | null;
+  inheritedData?: { date: string; amount: number; type?: 'Transfer' | 'Income' | 'Expense' | 'Loan'; category?: string; subCategory?: string; targetModule?: string; description?: string; linkedTxId?: string; accountId?: string; returnModule?: string; [key: string]: any } | null;
   onClearInheritedData?: () => void;
-  onNavigateToModule?: (module: string, initialAddData?: { date: string; amount: number; type?: 'Transfer' | 'Income' | 'Expense' | 'Loan'; targetModule?: string; description?: string }) => void;
+  onNavigateToModule?: (module: string, initialAddData?: any, openModal?: boolean) => void;
+  onDeleteLinkedIncome?: (txId: string) => void;
+  onUpdateLinkedIncome?: (txId: string, updates: { date: string; amount: number; description?: string }) => void;
+  onCreateFdrAccount?: (currency: 'BDT' | 'USD', accountName: string, initialDate: string) => void;
 }
 
 // Tooltip component matching MF module style
@@ -140,6 +144,7 @@ const SettingsButton: React.FC<SettingsButtonProps> = ({ isOpen, setIsOpen, onEx
 
 export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({ 
   investments, 
+  conversionRates,
   onAdd, 
   onUpdate,
   onDelete,
@@ -151,8 +156,12 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
   onTitleChange,
   inheritedData,
   onClearInheritedData,
-  onNavigateToModule
+  onNavigateToModule,
+  onDeleteLinkedIncome,
+  onUpdateLinkedIncome,
+  onCreateFdrAccount
 }) => {
+  const usdRate = conversionRates?.USD_to_BDT ?? 120;
   const uniqueInvestments = useMemo(() => {
     const seen = new Set();
     return (investments || []).filter(inv => {
@@ -172,6 +181,38 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
   const [isFDRModalOpen, setIsFDRModalOpen] = useState(false);
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [lastSelectedId, setLastSelectedId] = useState<string | null>(null);
+
+  const toggleSelectAll = () => {
+    if (selectedIds.length === filtered.length && filtered.length > 0) {
+      setSelectedIds([]);
+      setLastSelectedId(null);
+    } else {
+      setSelectedIds(filtered.map(t => t.uniqueId));
+    }
+  };
+
+  const toggleSelect = (id: string, e?: React.MouseEvent) => {
+    if (e?.shiftKey && lastSelectedId && lastSelectedId !== id) {
+      const lastIdx = filtered.findIndex(t => t.uniqueId === lastSelectedId);
+      const currIdx = filtered.findIndex(t => t.uniqueId === id);
+      if (lastIdx !== -1 && currIdx !== -1) {
+        const start = Math.min(lastIdx, currIdx);
+        const end = Math.max(lastIdx, currIdx);
+        const rangeIds = filtered.slice(start, end + 1).map(t => t.uniqueId);
+        setSelectedIds(prev => Array.from(new Set([...prev, ...rangeIds])));
+        setLastSelectedId(id);
+        return;
+      }
+    }
+
+    setLastSelectedId(id);
+    if (selectedIds.includes(id)) {
+      setSelectedIds(prev => prev.filter(i => i !== id));
+    } else {
+      setSelectedIds(prev => [...prev, id]);
+    }
+  };
   const [isSettingsMenuOpen, setIsSettingsMenuOpen] = useState(false);
   const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
   const [isFilterMenuOpen, setIsFilterMenuOpen] = useState(false);
@@ -181,108 +222,156 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
     title: string; 
     message: string; 
     onConfirm: () => void; 
-    variant?: 'danger' | 'warning' | 'info';
+    onCancel?: () => void;
+    variant?: 'danger' | 'warning' | 'info' | 'severe' | 'critical';
     confirmLabel?: string;
+    cancelLabel?: string;
+    details?: (string | null | undefined)[];
   } | null>(null);
 
   const closeConfirm = () => setConfirmState(prev => prev ? { ...prev, isOpen: false } : null);
-  const [historyRange, setHistoryRange] = useState<'all' | 'last12m' | 'fiscal' | 'custom'>('all');
+
+  // ─── Date Range Configuration (same range selector as Mutual Funds) ───
+  const [historyRange, setHistoryRange] = useState<'this' | 'fiscal' | 'custom'>('custom');
   const [historyCustomDates, setHistoryCustomDates] = useState(() => {
-    const now = new Date();
     return {
-      start: getFirstOfMonth(now),
+      start: '2025-01-01',
       end: getTodayStr(),
     };
   });
-  const [customNavMonth, setCustomNavMonth] = useState<{ year: number; month: number }>(() => {
+  const [historyThisMonthDate, setHistoryThisMonthDate] = useState(() => {
     const now = new Date();
-    return { year: now.getFullYear(), month: now.getMonth() };
+    return new Date(now.getFullYear(), now.getMonth(), 1);
   });
-
-  const navigateCustomMonth = (direction: -1 | 1) => {
+  const [historyFiscalStartYear, setHistoryFiscalStartYear] = useState(() => {
     const now = new Date();
-    const newMonth = customNavMonth.month + direction;
-    let year = customNavMonth.year;
-    let month = newMonth;
-    if (month < 0) { month = 11; year -= 1; }
-    if (month > 11) { month = 0; year += 1; }
-    const navDate = new Date(year, month, 1);
-    const isCurrentMonth = year === now.getFullYear() && month === now.getMonth();
-    setCustomNavMonth({ year, month });
+    return now.getMonth() >= 6 ? now.getFullYear() : now.getFullYear() - 1;
+  });
+  const navigateHistoryCustomMonth = (offset: number) => {
+    const currentStart = new Date(historyCustomDates.start);
+    const nextMonth = new Date(currentStart.getFullYear(), currentStart.getMonth() + offset, 1);
+    const now = new Date();
+    const isCurrentMonth =
+      nextMonth.getFullYear() === now.getFullYear() &&
+      nextMonth.getMonth() === now.getMonth();
+
     setHistoryCustomDates({
-      start: getFirstOfMonth(navDate),
-      end: isCurrentMonth ? getTodayStr() : getLastOfMonth(navDate),
+      start: getFirstOfMonth(nextMonth),
+      end: isCurrentMonth ? getTodayStr() : getLastOfMonth(nextMonth),
     });
   };
 
-  const handleRangeChange = (newRange: 'all' | 'last12m' | 'fiscal' | 'custom') => {
+  const navigateHistoryThisMonth = (offset: number) => {
+    setHistoryThisMonthDate(prev => new Date(prev.getFullYear(), prev.getMonth() + offset, 1));
+  };
+
+  const handleRangeChange = (newRange: 'this' | 'fiscal' | 'custom') => {
     if (newRange === 'custom') {
-      const now = new Date();
-      const navMonth = { year: now.getFullYear(), month: now.getMonth() };
-      setCustomNavMonth(navMonth);
       setHistoryCustomDates({
-        start: getFirstOfMonth(now),
+        start: '2025-01-01',
         end: getTodayStr(),
       });
     }
     setHistoryRange(newRange);
   };
+
   const [isRangeMenuOpen, setIsRangeMenuOpen] = useState(false);
   const [isTimeMenuOpen, setIsTimeMenuOpen] = useState(false);
+
+  // Helper used by the selector to display the selected month.
+  const formatHistoryThisMonthLabel = (d: Date) => {
+    const months = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    return `${months[d.getMonth()]} ${d.getFullYear()}`;
+  };
+
+  // Derive active date range for dashboard stats.
+  // This uses the same This Month / Fiscal / Custom semantics as Mutual Funds.
+  const rangeDates = useMemo(() => {
+    if (historyRange === 'this') {
+      return {
+        start: new Date(
+          historyThisMonthDate.getFullYear(),
+          historyThisMonthDate.getMonth(),
+          1
+        ),
+        end: new Date(
+          historyThisMonthDate.getFullYear(),
+          historyThisMonthDate.getMonth() + 1,
+          0,
+          23, 59, 59, 999
+        )
+      };
+    }
+
+    if (historyRange === 'fiscal') {
+      return {
+        start: new Date(historyFiscalStartYear, 6, 1),
+        end: new Date(historyFiscalStartYear + 1, 5, 30, 23, 59, 59, 999)
+      };
+    }
+
+    const start = historyCustomDates.start
+      ? new Date(historyCustomDates.start)
+      : new Date(0);
+    const end = historyCustomDates.end
+      ? new Date(historyCustomDates.end)
+      : new Date();
+
+    start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
+
+    return { start, end };
+  }, [
+    historyRange,
+    historyCustomDates,
+    historyThisMonthDate,
+    historyFiscalStartYear
+  ]);
+
+  useEffect(() => {
+    if (onTitleChange) {
+      const { start, end } = rangeDates;
+      const startStr = start.toLocaleString('default', { month: 'short', year: 'numeric' });
+      const endStr = end.toLocaleString('default', { month: 'short', year: 'numeric' });
+
+      onTitleChange(
+        <span className="flex items-center gap-2">
+          FIXED DEPOSITS
+          <span className="text-teal-400 font-display text-sm font-bold opacity-100 tracking-wider leading-none">
+            / {startStr} - {endStr}
+          </span>
+        </span>
+      );
+    }
+  }, [rangeDates, onTitleChange, historyRange]);
 
   // Time-based filtering state for transaction table
   const [timeFilterMode, setTimeFilterMode] = useState<'6months' | '1year' | 'custom'>('6months');
   const [timeOffset, setTimeOffset] = useState(0);
   const [customRange, setCustomRange] = useState({ start: '', end: '' });
+  const isFromExternalModuleRef = useRef(false);
+  const returnModuleRef = useRef<string | undefined>(undefined);
+  const [inheritedIncomeTxId, setInheritedIncomeTxId] = useState<string | undefined>(undefined);
 
-  // Derive active date range for dashboard stats
-  const rangeDates = useMemo(() => {
-    const now = new Date();
-    if (historyRange === 'all') return { start: new Date(0), end: new Date(3000, 11, 31, 23, 59, 59, 999) };
-    
-    if (historyRange === 'last12m') {
-      const start = new Date(now.getFullYear(), now.getMonth() - 11, 1);
-      const end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
-      return { start, end };
+  const checkAndReturnToModule = () => {
+    if (returnModuleRef.current && onNavigateToModule) {
+      const ret = returnModuleRef.current;
+      returnModuleRef.current = undefined;
+      onNavigateToModule(ret, undefined, false);
     }
-    
-    if (historyRange === 'fiscal') {
-      const currentYear = now.getFullYear();
-      const startYear = now.getMonth() >= 6 ? currentYear - 1 : currentYear - 2;
-      return { 
-        start: new Date(startYear, 6, 1), 
-        end: new Date(startYear + 1, 5, 30, 23, 59, 59, 999) 
-      };
-    }
-    
-    const start = historyCustomDates.start ? new Date(historyCustomDates.start) : new Date(0);
-    const end = historyCustomDates.end ? new Date(historyCustomDates.end) : new Date();
-    end.setHours(23, 59, 59, 999);
-    return { start, end };
-  }, [historyRange, historyCustomDates]);
-
-  useEffect(() => {
-    if (onTitleChange) {
-      if (historyRange === 'all') {
-        onTitleChange('Fixed Deposits');
-      } else {
-        const { start, end } = rangeDates;
-        const startStr = start.toLocaleString('default', { month: 'short', year: 'numeric' });
-        const endStr = end.toLocaleString('default', { month: 'short', year: 'numeric' });
-        onTitleChange(
-          <span className="flex items-center gap-2">
-            FIXED DEPOSITS <span className="text-teal-400 font-display text-sm font-bold opacity-100 tracking-wider leading-none">/ {startStr} - {endStr}</span>
-          </span>
-        );
-      }
-    }
-  }, [rangeDates, onTitleChange, historyRange]);
+  };
 
   useEffect(() => {
     if (triggerAdd) {
       setEditingTransaction(null);
       setEditingFDR(null);
       if (inheritedData) {
+        isFromExternalModuleRef.current = true;
+        returnModuleRef.current = inheritedData.returnModule;
+        setInheritedIncomeTxId(inheritedData.linkedTxId);
         const inheritedDate = inheritedData.date || new Date().toISOString().split('T')[0];
         const inheritedAmt = (inheritedData.amount !== undefined && inheritedData.amount !== null && inheritedData.amount !== 0) ? String(inheritedData.amount) : '';
         const inheritedDesc = inheritedData.description || '';
@@ -294,11 +383,20 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
           (f.name && inheritedDesc.toLowerCase().includes(f.name.toLowerCase()))
         );
 
-        if (inheritedData.type === 'Income') {
+        if (inheritedData.type === 'Income' || inheritedData.targetModule === 'fdr-profit') {
           setTransactionFormData({
             fdrId: matchedFDR?.id || (uniqueInvestments[0]?.id || ''),
             date: inheritedDate,
             type: 'Profit',
+            amount: inheritedAmt,
+            handling: matchedFDR ? matchedFDR.interestHandling : 'Withdrawn'
+          });
+          setIsModalOpen(true);
+        } else if (inheritedData.type === 'Expense' || inheritedData.targetModule === 'fdr-charge') {
+          setTransactionFormData({
+            fdrId: matchedFDR?.id || (uniqueInvestments[0]?.id || ''),
+            date: inheritedDate,
+            type: 'Charge',
             amount: inheritedAmt,
             handling: matchedFDR ? matchedFDR.interestHandling : 'Withdrawn'
           });
@@ -357,7 +455,7 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
           'Opening Date': inv.investmentDate,
           'Principal': inv.principal,
           'Currency': inv.currency,
-          'Exchange Rate': inv.exchangeRate || 1,
+          'Exchange Rate': inv.exchangeRate || (inv.currency === 'USD' ? usdRate : 1),
           'Profit': fdrStats.find(f => f.id === inv.id)?.netProfit || 0,
           'Current Balance': fdrStats.find(f => f.id === inv.id)?.currentBalance || 0,
           'Interest Frequency': inv.interestFrequency,
@@ -375,7 +473,7 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
             'Opening Date': inv.investmentDate,
             'Principal': inv.principal,
             'Currency': inv.currency,
-            'Exchange Rate': inv.exchangeRate || 1,
+            'Exchange Rate': inv.exchangeRate || (inv.currency === 'USD' ? usdRate : 1),
             'Profit': fdrStats.find(f => f.id === inv.id)?.netProfit || 0,
             'Current Balance': fdrStats.find(f => f.id === inv.id)?.currentBalance || 0,
             'Interest Frequency': inv.interestFrequency,
@@ -507,7 +605,6 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
     interestFrequency: 'Monthly' as 'Monthly' | 'Yearly',
     interestHandling: 'Withdrawn' as 'Added' | 'Withdrawn',
     status: 'Active' as 'Active' | 'Closed',
-    exchangeRate: '',
     closingDate: '',
     withdrawBalance: '',
   });
@@ -540,7 +637,7 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
           accountNo: inv.accountNo,
           currency: inv.currency,
           balance: balance,
-          uniqueId: `${inv.id}-${t.id}`
+          uniqueId: `${inv.id}:::${t.id}`
         });
       });
     });
@@ -674,8 +771,6 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
     let thisMonthDepositUSD = 0;
 
     uniqueInvestments.forEach(f => {
-      const rate = f.currency === 'USD' ? (f.exchangeRate || 1) : 1;
-
       if (f.investmentDate <= endStr && f.investmentDate >= startStr) {
         if (f.currency === 'BDT') totalInvestedBDT += f.principal;
         else totalInvestedUSD += f.principal;
@@ -752,7 +847,7 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
       }
     });
 
-    const activeUSDRate = uniqueInvestments.find(f => f.currency === 'USD' && f.exchangeRate)?.exchangeRate || 110;
+    const activeUSDRate = usdRate;
     const netProfitBDT = totalProfitBDT - totalChargeBDT;
     const netProfitUSD = totalProfitUSD - totalChargeUSD;
 
@@ -797,7 +892,7 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
       chargesBDT,
       chargesUSD,
     };
-  }, [uniqueInvestments, rangeDates]);
+  }, [uniqueInvestments, rangeDates, usdRate]);
 
   const handleEditInv = (inv: FDR) => {
     setEditingFDR(inv);
@@ -811,7 +906,6 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
       interestFrequency: inv.interestFrequency || 'Monthly',
       interestHandling: inv.interestHandling || 'Withdrawn',
       status: inv.status,
-      exchangeRate: inv.exchangeRate?.toString() || '',
       closingDate: inv.closingDate || '',
       withdrawBalance: inv.withdrawBalance?.toString() || (inv.status === 'Closed' ? statForEdit?.currentBalance?.toString() || '' : ''),
     });
@@ -829,7 +923,7 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
       interestFrequency: fdrFormData.interestFrequency,
       interestHandling: fdrFormData.interestHandling,
       status: fdrFormData.status,
-      exchangeRate: fdrFormData.currency === 'USD' ? (parseFloat(fdrFormData.exchangeRate) || undefined) : undefined,
+      exchangeRate: fdrFormData.currency === 'USD' ? usdRate : undefined,
       closingDate: fdrFormData.status === 'Closed' ? fdrFormData.closingDate || undefined : undefined,
       withdrawBalance: fdrFormData.status === 'Closed' ? (parseFloat(fdrFormData.withdrawBalance) || undefined) : undefined,
     };
@@ -847,18 +941,16 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
       });
       showNotification('success', 'Fixed Deposit added successfully!');
 
-      if (payload.principal > 0 && onNavigateToModule) {
-        onNavigateToModule('income-expense', {
-          date: payload.investmentDate,
-          amount: payload.principal,
-          type: 'Transfer',
-          targetModule: 'fdrs',
-          description: fdNameOnly
-        });
+      if (isFromExternalModuleRef.current) {
+        isFromExternalModuleRef.current = false;
+      } else if (onCreateFdrAccount) {
+        onCreateFdrAccount(payload.currency, fdNameOnly, payload.investmentDate);
       }
     }
     setIsFDRModalOpen(false);
     setEditingFDR(null);
+    isFromExternalModuleRef.current = false;
+    checkAndReturnToModule();
   };
 
   const handleTransactionSubmit = (e: React.FormEvent) => {
@@ -866,42 +958,90 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
     const fdr = uniqueInvestments.find(f => f.id === transactionFormData.fdrId);
     if (!fdr) return;
 
+    const txId = editingTransaction ? editingTransaction.transaction.id : (inheritedIncomeTxId || crypto.randomUUID());
+    const linkedIncomeTxId = editingTransaction?.transaction?.linkedIncomeTxId || inheritedIncomeTxId || txId;
+    const parsedAmount = parseFloat(transactionFormData.amount) || 0;
+
     const newTransaction: FDRTransaction = {
-      id: editingTransaction ? editingTransaction.transaction.id : Math.random().toString(36).substr(2, 9),
+      id: txId,
       date: transactionFormData.date,
       type: transactionFormData.type,
-      amount: parseFloat(transactionFormData.amount) || 0,
+      amount: parsedAmount,
       handling: transactionFormData.type === 'Profit' ? transactionFormData.handling : undefined,
+      linkedIncomeTxId: (transactionFormData.type === 'Profit' || transactionFormData.type === 'Charge') ? linkedIncomeTxId : undefined,
     };
 
     if (editingTransaction) {
       const updated = fdr.transactions.map(t => t.id === editingTransaction.transaction.id ? newTransaction : t);
       onUpdate(fdr.id, { transactions: updated });
+      if ((newTransaction.type === 'Profit' || newTransaction.type === 'Charge') && onUpdateLinkedIncome) {
+        const fdNameOnly = `${fdr.bankName}${fdr.accountNo ? ` (${fdr.accountNo})` : ''}`.trim();
+        onUpdateLinkedIncome(linkedIncomeTxId, {
+          date: newTransaction.date,
+          amount: newTransaction.amount,
+          description: newTransaction.type === 'Profit' ? `Fixed Deposit Profit: ${fdNameOnly}` : 'Account Related Fees'
+        });
+      }
       setEditingTransaction(null);
     } else {
       onUpdate(fdr.id, { transactions: [...fdr.transactions, newTransaction] });
 
-      if (onNavigateToModule && newTransaction.amount > 0) {
+      if (isFromExternalModuleRef.current) {
+        isFromExternalModuleRef.current = false;
+        setInheritedIncomeTxId(undefined);
+      } else if (onNavigateToModule && newTransaction.amount > 0 && (newTransaction.type === 'Profit' || newTransaction.type === 'Charge')) {
         const fdNameOnly = `${fdr.bankName}${fdr.accountNo ? ` (${fdr.accountNo})` : ''}`.trim();
-        if (newTransaction.type === 'Profit' && newTransaction.handling === 'Withdrawn') {
+        const fdrIdentifier = `${fdr.bankName || ''} ${fdr.accountNo || ''} ${fdr.name || ''}`.toLowerCase();
+        
+        let targetAccountId: string | undefined = undefined;
+        if (fdrIdentifier.includes('1409')) {
+          targetAccountId = 'bdt-ibbl-savings';
+        } else if (fdrIdentifier.includes('0216')) {
+          targetAccountId = 'usd-ibbl-fdr';
+        } else if (fdr.currency === 'USD') {
+          targetAccountId = 'usd-ibbl-fdr';
+        } else if (fdrIdentifier.includes('ibbl')) {
+          targetAccountId = 'bdt-ibbl-savings';
+        }
+
+        if (newTransaction.type === 'Profit') {
           onNavigateToModule('income-expense', {
             date: newTransaction.date,
             amount: newTransaction.amount,
             type: 'Income',
-            targetModule: 'fdrs',
-            description: `${fdNameOnly} Profit`
+            category: 'Finance Income',
+            subCategory: 'FDR Interest',
+            targetModule: 'fdr-profit',
+            description: `Fixed Deposit Profit: ${fdNameOnly}`,
+            linkedTxId: linkedIncomeTxId,
+            accountId: targetAccountId
+          });
+        } else {
+          onNavigateToModule('income-expense', {
+            date: newTransaction.date,
+            amount: newTransaction.amount,
+            type: 'Expense',
+            category: 'Other Expense',
+            subCategory: 'Account Related Fees',
+            targetModule: 'fdr-charge',
+            description: 'Account Related Fees',
+            linkedTxId: linkedIncomeTxId,
+            accountId: targetAccountId
           });
         }
       }
     }
     setIsModalOpen(false);
+    isFromExternalModuleRef.current = false;
+    setInheritedIncomeTxId(undefined);
+    checkAndReturnToModule();
     showNotification('success', 'Transaction recorded successfully!');
   };
 
   const handleDeleteTransaction = (fdrId: string, tId: string) => {
-    const fdr = investments.find(f => f.id === fdrId);
+    const fdr = (investments || []).find(f => f.id === fdrId);
     if (!fdr) return;
-    const trans = fdr.transactions.find(t => t.id === tId);
+    const trans = fdr.transactions?.find(t => t.id === tId);
 
     setConfirmState({
       isOpen: true,
@@ -909,7 +1049,15 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
       message: `Delete ${trans?.type || 'transaction'} for ${fdr.bankName} (${fdr.accountNo})?`,
       onConfirm: () => {
         closeConfirm();
-        onUpdate(fdrId, { transactions: fdr.transactions.filter(t => t.id !== tId) });
+        const currentFdr = (investments || []).find(f => f.id === fdrId) || fdr;
+        const currentTrans = currentFdr.transactions?.find(t => t.id === tId) || trans;
+        const filteredTrans = (currentFdr.transactions || []).filter(t => t.id !== tId);
+        onUpdate(fdrId, { transactions: filteredTrans });
+
+        const idsToDelete = [currentTrans?.linkedIncomeTxId, currentTrans?.id, tId].filter(Boolean) as string[];
+        idsToDelete.forEach(id => {
+          onDeleteLinkedIncome?.(id);
+        });
         showNotification('success', 'Transaction deleted!');
       },
       onCancel: closeConfirm
@@ -926,15 +1074,42 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
       onConfirm: () => {
         closeConfirm();
         const deletions: { [key: string]: string[] } = {};
+        const linkedTxIdsToDelete: string[] = [];
+
         selectedIds.forEach(uid => {
-          const [fdrId, tId] = uid.split('-');
+          let fdrId = '';
+          let tId = '';
+          if (uid.includes(':::')) {
+            const parts = uid.split(':::');
+            fdrId = parts[0];
+            tId = parts[1];
+          } else {
+            const lastDash = uid.lastIndexOf('-');
+            if (lastDash > 0) {
+              fdrId = uid.substring(0, lastDash);
+              tId = uid.substring(lastDash + 1);
+            }
+          }
+
+          if (!fdrId || !tId) return;
           if (!deletions[fdrId]) deletions[fdrId] = [];
           deletions[fdrId].push(tId);
+
+          const fdr = (investments || []).find(f => f.id === fdrId);
+          const trans = fdr?.transactions?.find(t => t.id === tId);
+          if (trans?.linkedIncomeTxId) linkedTxIdsToDelete.push(trans.linkedIncomeTxId);
+          if (trans?.id) linkedTxIdsToDelete.push(trans.id);
+          if (tId) linkedTxIdsToDelete.push(tId);
         });
+
         Object.entries(deletions).forEach(([fdrId, tIds]) => {
-          const fdr = investments.find(f => f.id === fdrId);
-          if (fdr) onUpdate(fdrId, { transactions: fdr.transactions.filter(t => !tIds.includes(t.id)) });
+          const fdr = (investments || []).find(f => f.id === fdrId);
+          if (fdr) {
+            onUpdate(fdrId, { transactions: (fdr.transactions || []).filter(t => !tIds.includes(t.id)) });
+          }
         });
+
+        linkedTxIdsToDelete.forEach(id => onDeleteLinkedIncome?.(id));
         setSelectedIds([]);
         showNotification('success', `Successfully deleted ${selectedIds.length} transactions.`);
       },
@@ -957,58 +1132,60 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
   return (
     <div className="space-y-8">
 
-      {/* Date Range Selector */}
+      {/* Date Range Selector — same UI/behavior as Mutual Funds */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/50 border border-slate-800 rounded-xl p-2 relative">
         <div className="flex flex-col sm:flex-row sm:items-center gap-3 w-full sm:w-auto">
-          {/* LINE 1 (Mobile): Range Selector + Settings */}
           <div className="flex items-center justify-between w-full sm:w-auto gap-2">
-            {/* Range Selection */}
             <div className="relative flex-1 sm:flex-none">
-              {/* Mobile Dropdown */}
+              {/* Mobile View: Dropdown */}
               <div className="block sm:hidden">
-                <button 
+                <button
                   onClick={() => setIsRangeMenuOpen(!isRangeMenuOpen)}
                   className="flex items-center justify-between gap-4 bg-slate-950 border border-slate-800 rounded-lg px-4 h-9 text-[10px] font-bold text-slate-300 hover:text-white transition-all uppercase w-full"
                 >
                   <div className="flex items-center gap-2">
                     <Calendar size={14} className="text-teal-400" />
-                    {historyRange === 'all' ? 'Overall' : 
-                     historyRange === 'last12m' ? 'Last 12M' : 
-                     historyRange === 'fiscal' ? 'Fiscal' : 'Custom'}
+                    {historyRange === 'this'
+                      ? 'This month'
+                      : historyRange === 'fiscal'
+                        ? 'Fiscal'
+                        : 'Custom'}
                   </div>
-                  <ChevronDown 
-                    size={14} 
+                  <ChevronDown
+                    size={14}
                     className={cn(
                       "text-slate-500 transition-transform",
                       isRangeMenuOpen ? "rotate-180 text-teal-400" : ""
-                    )} 
+                    )}
                   />
                 </button>
 
                 {isRangeMenuOpen && (
                   <>
-                    <div 
-                      className="fixed inset-0 z-40" 
-                      onClick={() => setIsRangeMenuOpen(false)} 
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setIsRangeMenuOpen(false)}
                     />
-                    <div className="absolute left-0 mt-2 w-full bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95 backdrop-blur-md">
-                      {['all', 'last12m', 'fiscal', 'custom'].map((id) => (
-                        <button 
+                    <div className="absolute left-0 mt-2 w-full bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95">
+                      {(['this', 'fiscal', 'custom'] as const).map(id => (
+                        <button
                           key={id}
                           onClick={() => {
-                            setHistoryRange(id as any);
+                            handleRangeChange(id);
                             setIsRangeMenuOpen(false);
                           }}
                           className={cn(
                             "w-full text-left px-3 py-2 text-[10px] font-bold rounded-lg transition-colors uppercase",
-                            historyRange === id 
-                              ? "bg-teal-400 text-slate-950" 
+                            historyRange === id
+                              ? "bg-teal-400 text-slate-950"
                               : "text-slate-300 hover:bg-slate-800"
                           )}
                         >
-                          {id === 'all' ? 'Overall' : 
-                           id === 'last12m' ? 'Last 12M' : 
-                           id === 'fiscal' ? 'Fiscal' : 'Custom'}
+                          {id === 'this'
+                            ? 'This month'
+                            : id === 'fiscal'
+                              ? 'Fiscal'
+                              : 'Custom'}
                         </button>
                       ))}
                     </div>
@@ -1016,32 +1193,34 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
                 )}
               </div>
 
-              {/* Desktop Tabs */}
-              <div className="hidden sm:flex items-center bg-slate-950/50 rounded-lg p-1 border border-slate-800/50 gap-1">
-                {['all', 'last12m', 'fiscal', 'custom'].map((id) => (
+              {/* Desktop View: Tabs */}
+              <div className="hidden sm:flex items-center bg-slate-950/50 rounded-lg p-1 border border-slate-800/50 gap-1 font-sans">
+                {(['this', 'fiscal', 'custom'] as const).map(id => (
                   <button
                     key={id}
-                    onClick={() => setHistoryRange(id as any)}
+                    onClick={() => handleRangeChange(id)}
                     className={cn(
                       "px-4 py-1.5 rounded-md text-[10px] font-bold uppercase transition-all border",
-                      historyRange === id 
-                        ? "bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/20" 
+                      historyRange === id
+                        ? "bg-teal-400 text-slate-950 shadow-lg shadow-teal-400/20"
                         : "bg-slate-900/40 border-slate-800/40 text-slate-300 hover:text-white"
                     )}
                   >
-                    {id === 'all' ? 'Overall' : 
-                     id === 'last12m' ? 'Last 12M' : 
-                     id === 'fiscal' ? 'Fiscal' : 'Custom'}
+                    {id === 'this'
+                      ? 'This month'
+                      : id === 'fiscal'
+                        ? 'Fiscal'
+                        : 'Custom'}
                   </button>
                 ))}
               </div>
             </div>
 
-            {/* Settings Button - Mobile */}
+            {/* Settings Button - Mobile Only */}
             <div className="block sm:hidden">
-              <SettingsButton 
-                isOpen={isSettingsMenuOpen} 
-                setIsOpen={setIsSettingsMenuOpen} 
+              <SettingsButton
+                isOpen={isSettingsMenuOpen}
+                setIsOpen={setIsSettingsMenuOpen}
                 onExport={exportData}
                 onImport={importData}
                 onTemplate={() => {
@@ -1059,47 +1238,77 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
             </div>
           </div>
 
-          {/* LINE 2 (Mobile): Custom Date Controls */}
-          {historyRange === 'custom' && (
-            <div className="flex items-center justify-center sm:justify-start gap-1.5 px-1 animate-in fade-in slide-in-from-top-2 sm:slide-in-from-left-2 duration-300 w-full sm:w-auto">
-              <button 
-                onClick={() => navigateCustomMonth(-1)} 
-                className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400"
-              >
-                <ChevronLeft size={14} />
-              </button>
+          {/* Date Browsing Controls */}
+          <div className="flex items-center gap-1.5 px-1 animate-in fade-in duration-300">
+            <button
+              onClick={() => {
+                if (historyRange === 'this') {
+                  navigateHistoryThisMonth(-1);
+                } else if (historyRange === 'fiscal') {
+                  setHistoryFiscalStartYear(prev => prev - 1);
+                } else {
+                  navigateHistoryCustomMonth(-1);
+                }
+              }}
+              className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              <ChevronLeft size={14} />
+            </button>
 
-              <input
-                type="date"
-                value={historyCustomDates.start}
-                onChange={(e) => setHistoryCustomDates(prev => ({ ...prev, start: e.target.value }))}
-                className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none focus:border-teal-400/50 uppercase flex-1 sm:flex-none"
-              />
+            {historyRange === 'custom' ? (
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="date"
+                  value={historyCustomDates.start}
+                  onChange={e => setHistoryCustomDates(prev => ({
+                    ...prev,
+                    start: e.target.value
+                  }))}
+                  className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none uppercase cursor-pointer"
+                />
+                <span className="text-slate-700 font-bold text-[10px]">–</span>
+                <input
+                  type="date"
+                  value={historyCustomDates.end}
+                  onChange={e => setHistoryCustomDates(prev => ({
+                    ...prev,
+                    end: e.target.value
+                  }))}
+                  className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none uppercase cursor-pointer"
+                />
+              </div>
+            ) : historyRange === 'fiscal' ? (
+              <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-[10px] font-bold text-white uppercase select-none tracking-wider whitespace-nowrap min-w-[160px] text-center">
+                July {historyFiscalStartYear} - June {historyFiscalStartYear + 1}
+              </div>
+            ) : (
+              <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-[10px] font-bold text-teal-400 uppercase select-none tracking-wider whitespace-nowrap min-w-[120px] text-center">
+                {formatHistoryThisMonthLabel(historyThisMonthDate)}
+              </div>
+            )}
 
-              <span className="text-slate-700 text-[10px] font-bold">–</span>
-
-              <input
-                type="date"
-                value={historyCustomDates.end}
-                onChange={(e) => setHistoryCustomDates(prev => ({ ...prev, end: e.target.value }))}
-                className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] font-bold text-white outline-none focus:border-teal-400/50 uppercase flex-1 sm:flex-none"
-              />
-
-              <button 
-                onClick={() => navigateCustomMonth(1)} 
-                className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400"
-              >
-                <ChevronRight size={14} />
-              </button>
-            </div>
-          )}
+            <button
+              onClick={() => {
+                if (historyRange === 'this') {
+                  navigateHistoryThisMonth(1);
+                } else if (historyRange === 'fiscal') {
+                  setHistoryFiscalStartYear(prev => prev + 1);
+                } else {
+                  navigateHistoryCustomMonth(1);
+                }
+              }}
+              className="flex items-center justify-center w-8 h-8 rounded-md bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              <ChevronRight size={14} />
+            </button>
+          </div>
         </div>
 
-        {/* Settings Button - Desktop */}
+        {/* Settings Button - Desktop Only */}
         <div className="hidden sm:block">
-          <SettingsButton 
-            isOpen={isSettingsMenuOpen} 
-            setIsOpen={setIsSettingsMenuOpen} 
+          <SettingsButton
+            isOpen={isSettingsMenuOpen}
+            setIsOpen={setIsSettingsMenuOpen}
             onExport={exportData}
             onImport={importData}
             onTemplate={() => {
@@ -1330,14 +1539,22 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
               </button>
               <button 
                 onClick={() => {
+                  const txCount = fdr.transactions?.length || 0;
                   setConfirmState({
                     isOpen: true,
-                    title: 'Confirm Delete',
-                    message: 'Are you sure you want to delete this Fixed Deposit and all its transactions?',
+                    title: 'Severe Warning: Deleting Main Fixed Deposit & All Transactions',
+                    message: `You are about to delete the main Fixed Deposit account at "${fdr.bankName} (${fdr.accountNo})". This will permanently delete the fixed deposit and ALL ${txCount} dependent profit payout records, deposit transactions, and linked ledger entries.`,
+                    variant: 'severe',
+                    confirmLabel: 'Delete FDR & All Dependents',
+                    details: [
+                      `Main Fixed Deposit Account: "${fdr.bankName} - ${fdr.accountNo}" (${fdr.currency})`,
+                      `${txCount} Dependent Profit Payout & Transaction Records`,
+                      'All historical interest accruals, maturity calculations, and ledger links'
+                    ],
                     onConfirm: () => {
                       closeConfirm();
                       onDelete(fdr.id);
-                      showNotification('success', 'Fixed Deposit deleted successfully!');
+                      showNotification('success', 'Fixed Deposit and all transactions deleted successfully!');
                     },
                     onCancel: closeConfirm
                   });
@@ -1537,7 +1754,7 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
       <div className="flex flex-col border border-slate-800 rounded-xl overflow-hidden bg-slate-900/50 shadow-2xl">
         <div className="overflow-x-auto custom-scrollbar">
           <div className="min-w-[900px] grid grid-cols-[48px_1.3fr_0.8fr_1.3fr_2fr_1.1fr_1.1fr_80px]">
-            <div className="flex items-center justify-center border-r border-b border-slate-800 bg-slate-900/80 py-3 sticky top-0 z-10"><Checkbox checked={selectedIds.length === filtered.length && filtered.length > 0} onChange={() => setSelectedIds(selectedIds.length === filtered.length ? [] : filtered.map(t => t.uniqueId))} /></div>
+            <div className="flex items-center justify-center border-r border-b border-slate-800 bg-slate-900/80 py-3 sticky top-0 z-10"><Checkbox checked={selectedIds.length === filtered.length && filtered.length > 0} onChange={toggleSelectAll} /></div>
             {[
               { label: 'Bank Account', id: 'bankName' }, 
               { label: 'Month', id: 'date' }, 
@@ -1591,7 +1808,7 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
               return (
                 <React.Fragment key={t.uniqueId}>
                   <div className={cn("flex items-center justify-center border-r border-b border-slate-800/50 py-3 transition-colors", isSelected ? "bg-teal-400/10" : "bg-slate-900/40")}>
-                    <Checkbox checked={isSelected} onChange={() => setSelectedIds(prev => prev.includes(t.uniqueId) ? prev.filter(id => id !== t.uniqueId) : [...prev, t.uniqueId])} />
+                    <Checkbox checked={isSelected} onChange={(_, e) => toggleSelect(t.uniqueId, e)} />
                   </div>
                   <div className={cn("px-4 py-3 border-r border-b border-slate-800/50 transition-colors flex flex-col justify-center", isSelected ? "bg-teal-400/10" : "bg-slate-900/40")}>
                     <span className="text-body-sm font-bold text-slate-300 uppercase truncate">{t.bankName} {t.accountNo}</span>
@@ -1634,7 +1851,16 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
       </div>
 
       {/* FDR Modal */}
-      <Modal isOpen={isFDRModalOpen} onClose={() => setIsFDRModalOpen(false)} title={editingFDR ? "Edit Fixed Deposit" : "Add New FD"}>
+      <Modal
+        isOpen={isFDRModalOpen}
+        onClose={() => {
+          setIsFDRModalOpen(false);
+          setEditingFDR(null);
+          isFromExternalModuleRef.current = false;
+          checkAndReturnToModule();
+        }}
+        title={editingFDR ? "Edit Fixed Deposit" : "Add Fixed Deposit"}
+      >
         <form onSubmit={handleFDRSubmit} className="space-y-4">
           <Input label="Bank Name" value={fdrFormData.bankName} onChange={e => setFdrFormData({...fdrFormData, bankName: e.target.value})} required />
           <Input label="Account Number" value={fdrFormData.accountNo} onChange={e => setFdrFormData({...fdrFormData, accountNo: e.target.value})} required />
@@ -1686,18 +1912,37 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
             </div>
           )}
 
-          {fdrFormData.currency === 'USD' && (
-            <Input label="Exchange Rate (1 USD = ? BDT)" type="number" step="0.01" value={fdrFormData.exchangeRate} onChange={e => setFdrFormData({...fdrFormData, exchangeRate: e.target.value})} required />
-          )}
-          <div className="flex justify-end gap-3 pt-4">
-            <Button variant="secondary" onClick={() => setIsFDRModalOpen(false)}>Cancel</Button>
-            <Button type="submit">{editingFDR ? "Update" : "Save"}</Button>
+          <div className="pt-2 flex gap-3">
+            <Button
+              type="button"
+              variant="secondary"
+              className="flex-1 py-2"
+              onClick={() => {
+                setIsFDRModalOpen(false);
+                setEditingFDR(null);
+                isFromExternalModuleRef.current = false;
+                checkAndReturnToModule();
+              }}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" className="flex-1 py-2">{editingFDR ? "Update FD" : "Create FD"}</Button>
           </div>
         </form>
       </Modal>
 
       {/* Transaction Modal */}
-      <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title="Record Transaction">
+      <Modal
+        isOpen={isModalOpen}
+        onClose={() => {
+          setIsModalOpen(false);
+          setEditingTransaction(null);
+          isFromExternalModuleRef.current = false;
+          setInheritedIncomeTxId(undefined);
+          checkAndReturnToModule();
+        }}
+        title={editingTransaction ? "Edit FD Profit" : "Add FD Profit"}
+      >
         <form onSubmit={handleTransactionSubmit} className="space-y-4">
           <Select 
             label="FD Account" 
@@ -1728,9 +1973,22 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
           )}
           <Input label="Amount" placeholder="0.00"
  type="number" step="0.01" value={transactionFormData.amount} onChange={e => setTransactionFormData({...transactionFormData, amount: e.target.value})} required />
-          <div className="flex justify-end gap-3 pt-4">
-            <Button variant="secondary" onClick={() => setIsModalOpen(false)}>Cancel</Button>
-            <Button type="submit">Record</Button>
+          <div className="pt-2 flex gap-3">
+            <Button
+              type="button"
+              variant="secondary"
+              className="flex-1 py-2"
+              onClick={() => {
+                setIsModalOpen(false);
+                setEditingTransaction(null);
+                isFromExternalModuleRef.current = false;
+                setInheritedIncomeTxId(undefined);
+                checkAndReturnToModule();
+              }}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" className="flex-1 py-2">{editingTransaction ? "Update Profit" : "Record Profit"}</Button>
           </div>
         </form>
       </Modal>

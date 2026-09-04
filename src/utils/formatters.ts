@@ -68,3 +68,28 @@ export const formatDate = (date: string | Date): string => {
 export const cn = (...classes: (string | undefined | boolean | null)[]) => {
   return classes.filter(Boolean).join(' ');
 };
+
+/**
+ * Formats a number in compact South Asian notation (e.g. 55.5L, 2.5Cr, 45K)
+ */
+export const formatCompactBDT = (val: number): string => {
+  if (!val || isNaN(val)) return '0';
+  const abs = Math.abs(val);
+  const sign = val < 0 ? '-' : '';
+  if (abs >= 10000000) {
+    const cr = abs / 10000000;
+    const formatted = cr.toFixed(1).replace(/\.0$/, '');
+    return `${sign}${formatted}Cr`;
+  }
+  if (abs >= 100000) {
+    const l = abs / 100000;
+    const formatted = l.toFixed(1).replace(/\.0$/, '');
+    return `${sign}${formatted}L`;
+  }
+  if (abs >= 1000) {
+    const k = abs / 1000;
+    const formatted = k.toFixed(1).replace(/\.0$/, '');
+    return `${sign}${formatted}K`;
+  }
+  return `${sign}${abs.toFixed(0)}`;
+};

@@ -5,22 +5,21 @@
 
 import { useState, useEffect } from 'react';
 import { AppState } from '../types';
-import { markDirty } from '../utils/sheetSync';
+import { markDirty, pushModuleData, serializeIncomeExpense } from '../utils/sheetSync';
 import type { ModuleKey } from '../utils/sheetSync';
 
 const STORAGE_KEY = 'fintrack_pro_data';
 
 // Map from AppState key → ModuleKey for dirty-marking
 const STATE_TO_MODULE: Partial<Record<keyof AppState, ModuleKey>> = {
-  onlineInvestments: 'onlineInvestments',
-  sukuks:            'sukuk',
-  mutualFunds:       'mutualFunds',
-  fdrs:              'fixedDeposits',
-
+  onlineInvestments:         'onlineInvestments',
+  sukuks:                    'sukuk',
+  mutualFunds:               'mutualFunds',
+  fdrs:                      'fixedDeposits',
   incomeExpenseTransactions: 'incomeExpense',
-  incomeExpenseAccounts: 'incomeExpense',
-  incomeExpenseCategories: 'incomeExpense',
-  conversionRates: 'incomeExpense',
+  incomeExpenseAccounts:     'incomeExpense',
+  incomeExpenseCategories:   'incomeExpense',
+  conversionRates:           'incomeExpense',
 };
 
 const initialData: AppState = {
@@ -91,13 +90,13 @@ const initialData: AppState = {
       id: 'cat-finance-income',
       name: 'Finance Income',
       type: 'Income',
-      subCategories: ['FDR Interest', 'Provisional Profit', 'Dividend', 'Investment Interest', 'Sukuk Rent', 'Other Finance Income']
+      subCategories: ['FDR Interest', 'Provisional Profit', 'Dividend', 'Sukuk Rent', 'Other Finance Income']
     },
     {
       id: 'cat-other-income',
       name: 'Other Income',
       type: 'Income',
-      subCategories: ['Book Royalty', 'Podcast Royalty', 'Other Income']
+      subCategories: ['Book Royalty', 'Podcast Royalty', 'Investment Interest', 'Other Income']
     },
     {
       id: 'cat-loan-income',
@@ -162,32 +161,41 @@ export function useAppState() {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
-        const useNewDefaults = !parsed.incomeExpenseAccounts || 
-          parsed.incomeExpenseAccounts.some((a: any) => a.id === 'bdt-wallet') || 
-          !parsed.incomeExpenseAccounts.some((a: any) => a.id === 'usd-bank-group');
         return { 
           ...initialData, 
           ...parsed,
-          incomeExpenseAccounts: useNewDefaults ? initialData.incomeExpenseAccounts : parsed.incomeExpenseAccounts,
-          incomeExpenseTransactions: useNewDefaults ? initialData.incomeExpenseTransactions : parsed.incomeExpenseTransactions,
+          incomeExpenseAccounts: Array.isArray(parsed.incomeExpenseAccounts) && parsed.incomeExpenseAccounts.length > 0
+            ? parsed.incomeExpenseAccounts
+            : initialData.incomeExpenseAccounts,
+          incomeExpenseTransactions: Array.isArray(parsed.incomeExpenseTransactions)
+            ? parsed.incomeExpenseTransactions
+            : initialData.incomeExpenseTransactions,
           incomeExpenseCategories: (() => {
-            if (!parsed.incomeExpenseCategories) return initialData.incomeExpenseCategories;
-            const merged = [...parsed.incomeExpenseCategories];
-            initialData.incomeExpenseCategories.forEach(defaultCat => {
-              const idx = merged.findIndex(c => c.id === defaultCat.id);
-              if (idx > -1) {
-                const existingSubs = merged[idx].subCategories || [];
-                const mergedSubs = Array.from(new Set([...defaultCat.subCategories, ...existingSubs]));
-                merged[idx] = {
-                  ...merged[idx],
-                  name: defaultCat.name,
-                  subCategories: mergedSubs
-                };
-              } else {
-                merged.push(defaultCat);
+            const rawCats = Array.isArray(parsed.incomeExpenseCategories) && parsed.incomeExpenseCategories.length > 0
+              ? parsed.incomeExpenseCategories
+              : initialData.incomeExpenseCategories;
+            return rawCats.map((c: any) => {
+              if (c.name === 'Other Income') {
+                const subCats = c.subCategories || [];
+                if (!subCats.includes('Investment Interest')) {
+                  const updatedSubs = [...subCats];
+                  const otherIdx = updatedSubs.indexOf('Other Income');
+                  if (otherIdx !== -1) {
+                    updatedSubs.splice(otherIdx, 0, 'Investment Interest');
+                  } else {
+                    updatedSubs.push('Investment Interest');
+                  }
+                  return { ...c, subCategories: updatedSubs };
+                }
               }
+              if (c.name === 'Finance Income') {
+                return {
+                  ...c,
+                  subCategories: (c.subCategories || []).filter((s: string) => s !== 'Investment Interest')
+                };
+              }
+              return c;
             });
-            return merged;
           })(),
           conversionRates: parsed.conversionRates || initialData.conversionRates,
           isLocked: true 
@@ -215,11 +223,30 @@ export function useAppState() {
       const newState = updater(prev);
 
       // Auto-detect which module arrays changed and mark them dirty
-      const modulesToMark = dirtyModules ?? (Object.entries(STATE_TO_MODULE) as [keyof AppState, ModuleKey][])
+      const detectedModules = (Object.entries(STATE_TO_MODULE) as [keyof AppState, ModuleKey][])
         .filter(([stateKey]) => newState[stateKey] !== prev[stateKey])
         .map(([, moduleKey]) => moduleKey);
 
-      modulesToMark.forEach(m => markDirty(m));
+      const modulesToMark = dirtyModules ?? Array.from(new Set(detectedModules));
+
+      // Execute side-effects asynchronously outside the React state calculation
+      setTimeout(() => {
+        modulesToMark.forEach(m => {
+          markDirty(m);
+          // Instant sync with Google Sheets without any delay
+          if (m === 'fixedDeposits') {
+            pushModuleData('fixedDeposits', newState.fdrs);
+          } else if (m === 'mutualFunds') {
+            pushModuleData('mutualFunds', newState.mutualFunds);
+          } else if (m === 'sukuk') {
+            pushModuleData('sukuk', newState.sukuks);
+          } else if (m === 'onlineInvestments') {
+            pushModuleData('onlineInvestments', newState.onlineInvestments);
+          } else if (m === 'incomeExpense') {
+            pushModuleData('incomeExpense', serializeIncomeExpense(newState));
+          }
+        });
+      }, 0);
 
       return newState;
     });

@@ -3,11 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useRef, useState } from 'react';
-import { Card, Button, Modal } from '../ui/BaseComponents';
+import React, { useRef, useState, useEffect } from 'react';
+import { Card, Button, Modal, Input } from '../ui/BaseComponents';
 import { AppState } from '../../types';
 import { cn } from '../../utils/formatters';
-import { Download, Upload, Shield, Database, AlertCircle, CheckCircle2, XCircle } from 'lucide-react';
+import { Download, Upload, Shield, Database, AlertCircle, CheckCircle2, XCircle, Coins } from 'lucide-react';
 
 interface SettingsModuleProps {
   state: AppState;
@@ -21,9 +21,37 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({ state, updateSta
   const [isClearModalOpen, setIsClearModalOpen] = useState(false);
   const [clearConfirmText, setClearConfirmText] = useState('');
 
+  const currentUsdRate = state.conversionRates?.USD_to_BDT ?? 120;
+  const currentLydRate = state.conversionRates?.LYD_to_BDT ?? 20;
+  const [usdRateForm, setUsdRateForm] = useState(String(currentUsdRate));
+  const [lydRateForm, setLydRateForm] = useState(String(currentLydRate));
+
+  useEffect(() => {
+    setUsdRateForm(String(state.conversionRates?.USD_to_BDT ?? 120));
+    setLydRateForm(String(state.conversionRates?.LYD_to_BDT ?? 20));
+  }, [state.conversionRates?.USD_to_BDT, state.conversionRates?.LYD_to_BDT]);
+
   const showNotification = (type: 'success' | 'error', message: string) => {
     setNotification({ type, message });
     setTimeout(() => setNotification(null), 5000);
+  };
+
+  const handleSaveRates = (e: React.FormEvent) => {
+    e.preventDefault();
+    const usdVal = parseFloat(usdRateForm);
+    const lydVal = parseFloat(lydRateForm);
+    if (isNaN(usdVal) || isNaN(lydVal) || usdVal <= 0 || lydVal <= 0) {
+      showNotification('error', 'Please enter valid positive numeric conversion rates.');
+      return;
+    }
+    updateState(prev => ({
+      ...prev,
+      conversionRates: {
+        USD_to_BDT: usdVal,
+        LYD_to_BDT: lydVal
+      }
+    }));
+    showNotification('success', 'Foreign exchange rates updated successfully across the app!');
   };
 
   const handleBackup = () => {
@@ -116,6 +144,38 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({ state, updateSta
           <p className="text-body font-bold uppercase">{notification.message}</p>
         </div>
       )}
+
+      {/* Foreign Exchange Rate Setting Panel */}
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+        <div className="flex items-center gap-3 mb-2">
+          <Coins className="text-teal-400 w-5 h-5 shrink-0" />
+          <h4 className="text-subheading font-bold text-white uppercase tracking-tight">Foreign Exchange rate setting</h4>
+        </div>
+        <p className="text-label text-slate-500 font-semibold uppercase mb-6">
+          Defines conversion ratios from LYD and USD to native BDT currency across all app modules
+        </p>
+        <form onSubmit={handleSaveRates} className="grid grid-cols-1 md:grid-cols-3 gap-6 items-end">
+          <Input 
+            label="USD TO BDT RATE (৳)" 
+            type="number" 
+            step="0.01" 
+            value={usdRateForm} 
+            onChange={(e) => setUsdRateForm(e.target.value)} 
+            placeholder="e.g. 120" 
+          />
+          <Input 
+            label="LYD TO BDT RATE (৳)" 
+            type="number" 
+            step="0.01" 
+            value={lydRateForm} 
+            onChange={(e) => setLydRateForm(e.target.value)} 
+            placeholder="e.g. 20" 
+          />
+          <Button type="submit" variant="primary" className="w-full h-10 font-bold uppercase tracking-wider">
+            Save Conversion Rates
+          </Button>
+        </form>
+      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Data Management Card */}
