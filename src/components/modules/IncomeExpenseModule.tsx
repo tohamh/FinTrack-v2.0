@@ -4053,6 +4053,7 @@ export function IncomeExpenseModule({
   const [txTypeFilter, setTxTypeFilter] = useState<'All' | 'Income' | 'Expense' | 'Transfer' | 'Loan'>('All');
   const [txAccFilter, setTxAccFilter] = useState<string>('All');
   const [txCatFilter, setTxCatFilter] = useState<string>('All');
+  const [activeTxDropdown, setActiveTxDropdown] = useState<'type' | 'acc' | 'cat' | null>(null);
   const [selectedTxIds, setSelectedTxIds] = useState<string[]>([]);
   const [lastSelectedTxId, setLastSelectedTxId] = useState<string | null>(null);
 
@@ -4644,168 +4645,168 @@ export function IncomeExpenseModule({
           <div className="space-y-6 sm:space-y-8">
             
             {/* 4 Cards Container */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 items-stretch">
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 items-stretch">
               
               {/* Card 1: CONVERTED BDT */}
-              <Card className="bg-slate-900 border-slate-800 h-full flex flex-col p-3 sm:p-4 transition-all hover:border-teal-400/50 hover:shadow-[0_0_20px_rgba(45,212,191,0.1)] group">
+              <Card className="bg-slate-900 border-slate-800 h-full flex flex-col p-2.5 sm:p-4 transition-all hover:border-teal-400/50 hover:shadow-[0_0_20px_rgba(45,212,191,0.1)] group">
                 <div className="flex-1">
-                  <div className="flex justify-between items-start mb-4">
-                    <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-teal-400/10 flex items-center justify-center text-teal-400 group-hover:scale-110 transition-transform">
-                      <span className="font-extrabold text-sm sm:text-base font-display">৳</span>
+                  <div className="flex justify-between items-start mb-2 sm:mb-4">
+                    <div className="w-7 h-7 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-teal-400/10 flex items-center justify-center text-teal-400 group-hover:scale-110 transition-transform">
+                      <span className="font-extrabold text-xs sm:text-base font-display">৳</span>
                     </div>
                   </div>
-                  <div className="mb-2">
-                    <p className="text-body-sm font-bold text-white uppercase tracking-wider">Total Balance in BDT</p>
+                  <div className="mb-1 sm:mb-2">
+                    <p className="text-[10px] sm:text-body-sm font-bold text-white uppercase tracking-wider truncate">Total Balance in BDT</p>
                   </div>
-                  <h3 className="text-heading font-bold text-teal-400 mb-4 tracking-tight font-display tabular-nums truncate">
+                  <h3 className="text-subheading sm:text-heading font-bold text-teal-400 mb-2 sm:mb-4 tracking-tight font-display tabular-nums truncate">
                     {formatBDT(totalBDT + (totalLYD * LYD_rate) + (totalUSD * USD_rate))}
                   </h3>
                   {(totalCurrentBorrowedBDT > 0 || totalCurrentLentBDT > 0) && (
-                    <div className="flex flex-wrap items-center gap-2 mb-3 mt-[-6px]">
+                    <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 mb-2 sm:mb-3 mt-[-4px] sm:mt-[-6px]">
                       {totalCurrentBorrowedBDT > 0 && (
-                        <span className="text-[9px] bg-rose-500/10 text-rose-400 px-1.5 py-0.5 rounded border border-rose-500/20 font-bold uppercase tracking-tight">
+                        <span className="text-[8px] sm:text-[9px] bg-rose-500/10 text-rose-400 px-1 sm:px-1.5 py-0.5 rounded border border-rose-500/20 font-bold uppercase tracking-tight truncate">
                           Borrowed: -{formatBDT(totalCurrentBorrowedBDT)}
                         </span>
                       )}
                       {totalCurrentLentBDT > 0 && (
-                        <span className="text-[9px] bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-500/20 font-bold uppercase tracking-tight">
+                        <span className="text-[8px] sm:text-[9px] bg-emerald-500/10 text-emerald-400 px-1 sm:px-1.5 py-0.5 rounded border border-emerald-500/20 font-bold uppercase tracking-tight truncate">
                           Lent: +{formatBDT(totalCurrentLentBDT)}
                         </span>
                       )}
                     </div>
                   )}
                 </div>
-                <div className="flex flex-col justify-center gap-1.5 pt-3 border-t border-slate-800 h-14">
-                  <div className="flex justify-between items-center text-[10px] font-semibold text-slate-400">
-                    <span className="flex items-center gap-1"><ArrowUpRight size={10} className="text-emerald-400" /> Inflow</span>
-                    <span className="text-emerald-400 font-bold tabular-nums">{formatBDT(periodIncomeBdt)}</span>
+                <div className="flex flex-col justify-center gap-1 sm:gap-1.5 pt-2 sm:pt-3 border-t border-slate-800 min-h-[44px] sm:h-14">
+                  <div className="flex justify-between items-center text-[9px] sm:text-[10px] font-semibold text-slate-400">
+                    <span className="flex items-center gap-0.5 sm:gap-1"><ArrowUpRight size={9} className="text-emerald-400 shrink-0" /> Inflow</span>
+                    <span className="text-emerald-400 font-bold tabular-nums truncate ml-1">{formatBDT(periodIncomeBdt)}</span>
                   </div>
-                  <div className="flex justify-between items-center text-[10px] font-semibold text-slate-400">
-                    <span className="flex items-center gap-1"><ArrowDownRight size={10} className="text-rose-400" /> Outflow</span>
-                    <span className="text-rose-400 font-bold tabular-nums">{formatBDT(periodExpenseBdt)}</span>
+                  <div className="flex justify-between items-center text-[9px] sm:text-[10px] font-semibold text-slate-400">
+                    <span className="flex items-center gap-0.5 sm:gap-1"><ArrowDownRight size={9} className="text-rose-400 shrink-0" /> Outflow</span>
+                    <span className="text-rose-400 font-bold tabular-nums truncate ml-1">{formatBDT(periodExpenseBdt)}</span>
                   </div>
                 </div>
               </Card>
 
               {/* Card 2: BDT accounts balance */}
-              <Card className="bg-slate-900 border-slate-800 h-full flex flex-col p-3 sm:p-4 transition-all hover:border-teal-400/50 hover:shadow-[0_0_20px_rgba(45,212,191,0.1)] group">
+              <Card className="bg-slate-900 border-slate-800 h-full flex flex-col p-2.5 sm:p-4 transition-all hover:border-teal-400/50 hover:shadow-[0_0_20px_rgba(45,212,191,0.1)] group">
                 <div className="flex-1">
-                  <div className="flex justify-between items-start mb-4">
-                    <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-teal-400/10 flex items-center justify-center text-teal-400 group-hover:scale-110 transition-transform">
-                      <span className="font-extrabold text-sm sm:text-base font-display">৳</span>
+                  <div className="flex justify-between items-start mb-2 sm:mb-4">
+                    <div className="w-7 h-7 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-teal-400/10 flex items-center justify-center text-teal-400 group-hover:scale-110 transition-transform">
+                      <span className="font-extrabold text-xs sm:text-base font-display">৳</span>
                     </div>
                   </div>
-                  <div className="mb-2">
-                    <p className="text-body-sm font-bold text-white uppercase tracking-wider">Balance in BDT</p>
+                  <div className="mb-1 sm:mb-2">
+                    <p className="text-[10px] sm:text-body-sm font-bold text-white uppercase tracking-wider truncate">Balance in BDT</p>
                   </div>
-                  <h3 className="text-heading font-bold text-teal-400 mb-4 tracking-tight font-display tabular-nums truncate">
+                  <h3 className="text-subheading sm:text-heading font-bold text-teal-400 mb-2 sm:mb-4 tracking-tight font-display tabular-nums truncate">
                     {formatBDT(totalBDT)}
                   </h3>
                   {(loanStatsByCurrency.BDT.borrowed > 0 || loanStatsByCurrency.BDT.lent > 0) && (
-                    <div className="flex flex-wrap items-center gap-2 mb-3 mt-[-6px]">
+                    <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 mb-2 sm:mb-3 mt-[-4px] sm:mt-[-6px]">
                       {loanStatsByCurrency.BDT.borrowed > 0 && (
-                        <span className="text-[9px] bg-rose-500/10 text-rose-400 px-1.5 py-0.5 rounded border border-rose-500/20 font-bold uppercase tracking-tight">
+                        <span className="text-[8px] sm:text-[9px] bg-rose-500/10 text-rose-400 px-1 sm:px-1.5 py-0.5 rounded border border-rose-500/20 font-bold uppercase tracking-tight truncate">
                           Borrowed: -{formatBDT(loanStatsByCurrency.BDT.borrowed)}
                         </span>
                       )}
                       {loanStatsByCurrency.BDT.lent > 0 && (
-                        <span className="text-[9px] bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-500/20 font-bold uppercase tracking-tight">
+                        <span className="text-[8px] sm:text-[9px] bg-emerald-500/10 text-emerald-400 px-1 sm:px-1.5 py-0.5 rounded border border-emerald-500/20 font-bold uppercase tracking-tight truncate">
                           Lent: +{formatBDT(loanStatsByCurrency.BDT.lent)}
                         </span>
                       )}
                     </div>
                   )}
                 </div>
-                <div className="flex flex-col justify-center gap-1.5 pt-3 border-t border-slate-800 h-14">
-                  <div className="flex justify-between items-center text-[10px] font-semibold text-slate-400">
-                    <span className="flex items-center gap-1"><ArrowUpRight size={10} className="text-emerald-400" /> Inflow</span>
-                    <span className="text-emerald-400 font-bold tabular-nums">{formatBDT(bdtIn)}</span>
+                <div className="flex flex-col justify-center gap-1 sm:gap-1.5 pt-2 sm:pt-3 border-t border-slate-800 min-h-[44px] sm:h-14">
+                  <div className="flex justify-between items-center text-[9px] sm:text-[10px] font-semibold text-slate-400">
+                    <span className="flex items-center gap-0.5 sm:gap-1"><ArrowUpRight size={9} className="text-emerald-400 shrink-0" /> Inflow</span>
+                    <span className="text-emerald-400 font-bold tabular-nums truncate ml-1">{formatBDT(bdtIn)}</span>
                   </div>
-                  <div className="flex justify-between items-center text-[10px] font-semibold text-slate-400">
-                    <span className="flex items-center gap-1"><ArrowDownRight size={10} className="text-rose-400" /> Outflow</span>
-                    <span className="text-rose-400 font-bold tabular-nums">{formatBDT(bdtOut)}</span>
+                  <div className="flex justify-between items-center text-[9px] sm:text-[10px] font-semibold text-slate-400">
+                    <span className="flex items-center gap-0.5 sm:gap-1"><ArrowDownRight size={9} className="text-rose-400 shrink-0" /> Outflow</span>
+                    <span className="text-rose-400 font-bold tabular-nums truncate ml-1">{formatBDT(bdtOut)}</span>
                   </div>
                 </div>
               </Card>
 
               {/* Card 3: LYD accounts balance */}
-              <Card className="bg-slate-900 border-slate-800 h-full flex flex-col p-3 sm:p-4 transition-all hover:border-amber-400/50 hover:shadow-[0_0_20px_rgba(245,158,11,0.1)] group">
+              <Card className="bg-slate-900 border-slate-800 h-full flex flex-col p-2.5 sm:p-4 transition-all hover:border-amber-400/50 hover:shadow-[0_0_20px_rgba(245,158,11,0.1)] group">
                 <div className="flex-1">
-                  <div className="flex justify-between items-start mb-4">
-                    <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-amber-400/10 flex items-center justify-center text-amber-400 group-hover:scale-110 transition-transform font-display">
-                      <span className="font-extrabold text-xs sm:text-sm font-display">LD</span>
+                  <div className="flex justify-between items-start mb-2 sm:mb-4">
+                    <div className="w-7 h-7 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-amber-400/10 flex items-center justify-center text-amber-400 group-hover:scale-110 transition-transform font-display">
+                      <span className="font-extrabold text-[10px] sm:text-sm font-display">LD</span>
                     </div>
                   </div>
-                  <div className="mb-2">
-                    <p className="text-body-sm font-bold text-white uppercase tracking-wider">Balance in LYD</p>
+                  <div className="mb-1 sm:mb-2">
+                    <p className="text-[10px] sm:text-body-sm font-bold text-white uppercase tracking-wider truncate">Balance in LYD</p>
                   </div>
-                  <h3 className="text-heading font-bold text-amber-400 mb-4 tracking-tight font-display tabular-nums truncate">
+                  <h3 className="text-subheading sm:text-heading font-bold text-amber-400 mb-2 sm:mb-4 tracking-tight font-display tabular-nums truncate">
                     {formatCurrency(totalLYD, 'LYD')}
                   </h3>
                   {(loanStatsByCurrency.LYD.borrowed > 0 || loanStatsByCurrency.LYD.lent > 0) && (
-                    <div className="flex flex-wrap items-center gap-2 mb-3 mt-[-6px]">
+                    <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 mb-2 sm:mb-3 mt-[-4px] sm:mt-[-6px]">
                       {loanStatsByCurrency.LYD.borrowed > 0 && (
-                        <span className="text-[9px] bg-rose-500/10 text-rose-400 px-1.5 py-0.5 rounded border border-rose-500/20 font-bold uppercase tracking-tight">
+                        <span className="text-[8px] sm:text-[9px] bg-rose-500/10 text-rose-400 px-1 sm:px-1.5 py-0.5 rounded border border-rose-500/20 font-bold uppercase tracking-tight truncate">
                           Borrowed: -{formatCurrency(loanStatsByCurrency.LYD.borrowed, 'LYD')}
                         </span>
                       )}
                       {loanStatsByCurrency.LYD.lent > 0 && (
-                        <span className="text-[9px] bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-500/20 font-bold uppercase tracking-tight font-sans">
+                        <span className="text-[8px] sm:text-[9px] bg-emerald-500/10 text-emerald-400 px-1 sm:px-1.5 py-0.5 rounded border border-emerald-500/20 font-bold uppercase tracking-tight truncate font-sans">
                           Lent: +{formatCurrency(loanStatsByCurrency.LYD.lent, 'LYD')}
                         </span>
                       )}
                     </div>
                   )}
                 </div>
-                <div className="flex flex-col justify-center gap-1.5 pt-3 border-t border-slate-800 h-14">
-                  <div className="flex justify-between items-center text-[10px] font-semibold text-slate-400">
-                    <span className="flex items-center gap-1"><ArrowUpRight size={10} className="text-emerald-400" /> Inflow</span>
-                    <span className="text-emerald-400 font-bold tabular-nums">{formatCurrency(lydIn, 'LYD')}</span>
+                <div className="flex flex-col justify-center gap-1 sm:gap-1.5 pt-2 sm:pt-3 border-t border-slate-800 min-h-[44px] sm:h-14">
+                  <div className="flex justify-between items-center text-[9px] sm:text-[10px] font-semibold text-slate-400">
+                    <span className="flex items-center gap-0.5 sm:gap-1"><ArrowUpRight size={9} className="text-emerald-400 shrink-0" /> Inflow</span>
+                    <span className="text-emerald-400 font-bold tabular-nums truncate ml-1">{formatCurrency(lydIn, 'LYD')}</span>
                   </div>
-                  <div className="flex justify-between items-center text-[10px] font-semibold text-slate-400">
-                    <span className="flex items-center gap-1"><ArrowDownRight size={10} className="text-rose-400" /> Outflow</span>
-                    <span className="text-rose-400 font-bold tabular-nums">{formatCurrency(lydOut, 'LYD')}</span>
+                  <div className="flex justify-between items-center text-[9px] sm:text-[10px] font-semibold text-slate-400">
+                    <span className="flex items-center gap-0.5 sm:gap-1"><ArrowDownRight size={9} className="text-rose-400 shrink-0" /> Outflow</span>
+                    <span className="text-rose-400 font-bold tabular-nums truncate ml-1">{formatCurrency(lydOut, 'LYD')}</span>
                   </div>
                 </div>
               </Card>
 
               {/* Card 4: USD accounts balance */}
-              <Card className="bg-slate-900 border-slate-800 h-full flex flex-col p-3 sm:p-4 transition-all hover:border-sky-400/50 hover:shadow-[0_0_20px_rgba(56,189,248,0.1)] group">
+              <Card className="bg-slate-900 border-slate-800 h-full flex flex-col p-2.5 sm:p-4 transition-all hover:border-sky-400/50 hover:shadow-[0_0_20px_rgba(56,189,248,0.1)] group">
                 <div className="flex-1">
-                  <div className="flex justify-between items-start mb-4">
-                    <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-sky-400/10 flex items-center justify-center text-sky-400 group-hover:scale-110 transition-transform font-display">
-                      <span className="font-extrabold text-sm sm:text-base font-display font-display">$</span>
+                  <div className="flex justify-between items-start mb-2 sm:mb-4">
+                    <div className="w-7 h-7 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-sky-400/10 flex items-center justify-center text-sky-400 group-hover:scale-110 transition-transform font-display">
+                      <span className="font-extrabold text-xs sm:text-base font-display">$</span>
                     </div>
                   </div>
-                  <div className="mb-2">
-                    <p className="text-body-sm font-bold text-white uppercase tracking-wider">Balance in USD</p>
+                  <div className="mb-1 sm:mb-2">
+                    <p className="text-[10px] sm:text-body-sm font-bold text-white uppercase tracking-wider truncate">Balance in USD</p>
                   </div>
-                  <h3 className="text-heading font-bold text-sky-400 mb-4 tracking-tight font-display tabular-nums truncate">
+                  <h3 className="text-subheading sm:text-heading font-bold text-sky-400 mb-2 sm:mb-4 tracking-tight font-display tabular-nums truncate">
                     {formatCurrency(totalUSD, 'USD')}
                   </h3>
                   {(loanStatsByCurrency.USD.borrowed > 0 || loanStatsByCurrency.USD.lent > 0) && (
-                    <div className="flex flex-wrap items-center gap-2 mb-3 mt-[-6px]">
+                    <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 mb-2 sm:mb-3 mt-[-4px] sm:mt-[-6px]">
                       {loanStatsByCurrency.USD.borrowed > 0 && (
-                        <span className="text-[9px] bg-rose-500/10 text-rose-400 px-1.5 py-0.5 rounded border border-rose-500/20 font-bold uppercase tracking-tight font-sans">
+                        <span className="text-[8px] sm:text-[9px] bg-rose-500/10 text-rose-400 px-1 sm:px-1.5 py-0.5 rounded border border-rose-500/20 font-bold uppercase tracking-tight truncate font-sans">
                           Borrowed: -{formatCurrency(loanStatsByCurrency.USD.borrowed, 'USD')}
                         </span>
                       )}
                       {loanStatsByCurrency.USD.lent > 0 && (
-                        <span className="text-[9px] bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-500/20 font-bold uppercase tracking-tight font-sans">
+                        <span className="text-[8px] sm:text-[9px] bg-emerald-500/10 text-emerald-400 px-1 sm:px-1.5 py-0.5 rounded border border-emerald-500/20 font-bold uppercase tracking-tight truncate font-sans">
                           Lent: +{formatCurrency(loanStatsByCurrency.USD.lent, 'USD')}
                         </span>
                       )}
                     </div>
                   )}
                 </div>
-                <div className="flex flex-col justify-center gap-1.5 pt-3 border-t border-slate-800 h-14">
-                  <div className="flex justify-between items-center text-[10px] font-semibold text-slate-400">
-                    <span className="flex items-center gap-1"><ArrowUpRight size={10} className="text-emerald-400" /> Inflow</span>
-                    <span className="text-emerald-400 font-bold tabular-nums">{formatCurrency(usdIn, 'USD')}</span>
+                <div className="flex flex-col justify-center gap-1 sm:gap-1.5 pt-2 sm:pt-3 border-t border-slate-800 min-h-[44px] sm:h-14">
+                  <div className="flex justify-between items-center text-[9px] sm:text-[10px] font-semibold text-slate-400">
+                    <span className="flex items-center gap-0.5 sm:gap-1"><ArrowUpRight size={9} className="text-emerald-400 shrink-0" /> Inflow</span>
+                    <span className="text-emerald-400 font-bold tabular-nums truncate ml-1">{formatCurrency(usdIn, 'USD')}</span>
                   </div>
-                  <div className="flex justify-between items-center text-[10px] font-semibold text-slate-400">
-                    <span className="flex items-center gap-1"><ArrowDownRight size={10} className="text-rose-400" /> Outflow</span>
-                    <span className="text-rose-400 font-bold tabular-nums">{formatCurrency(usdOut, 'USD')}</span>
+                  <div className="flex justify-between items-center text-[9px] sm:text-[10px] font-semibold text-slate-400">
+                    <span className="flex items-center gap-0.5 sm:gap-1"><ArrowDownRight size={9} className="text-rose-400 shrink-0" /> Outflow</span>
+                    <span className="text-rose-400 font-bold tabular-nums truncate ml-1">{formatCurrency(usdOut, 'USD')}</span>
                   </div>
                 </div>
               </Card>
@@ -5229,42 +5230,194 @@ export function IncomeExpenseModule({
                 <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500" />
                 <input type="text" placeholder="SEARCH RECENT LEDGER..." value={txSearch} onChange={(e) => setTxSearch(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-10 pr-4 py-2 text-label font-bold text-white placeholder-slate-600 outline-none focus:border-teal-400 uppercase tracking-wider" />
               </div>
-              <div className="flex flex-wrap sm:flex-nowrap items-center gap-2.5 w-full md:w-auto">
-                <div className="relative w-full sm:w-36">
-                  <select 
-                    value={txTypeFilter} 
-                    onChange={(e) => setTxTypeFilter(e.target.value as any)} 
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-3 pr-8 py-2 text-[10px] font-extrabold text-slate-300 outline-none uppercase appearance-none cursor-pointer hover:border-slate-700 focus:border-teal-400"
+              <div className="grid grid-cols-3 sm:flex sm:items-center gap-1.5 sm:gap-2.5 w-full md:w-auto">
+                {/* 1. Types Dropdown */}
+                <div className="relative min-w-0 sm:w-36">
+                  <button
+                    type="button"
+                    onClick={() => setActiveTxDropdown(prev => prev === 'type' ? null : 'type')}
+                    className={cn(
+                      "w-full flex items-center justify-between gap-1 bg-slate-950 border rounded-lg px-2 sm:px-3 py-2 text-[10px] font-extrabold uppercase transition-colors outline-none cursor-pointer",
+                      txTypeFilter !== 'All' ? "border-teal-400/50 text-teal-400" : "border-slate-800 text-slate-300 hover:border-slate-700"
+                    )}
                   >
-                    <option value="All">All Types</option>
-                    <option value="Income">Income</option>
-                    <option value="Expense">Expense</option>
-                  </select>
-                  <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                    <span className="truncate">
+                      {txTypeFilter === 'All' ? 'All Types' : txTypeFilter}
+                    </span>
+                    <ChevronDown size={12} className={cn("text-slate-500 shrink-0 transition-transform duration-200", activeTxDropdown === 'type' ? "rotate-180 text-teal-400" : "")} />
+                  </button>
+
+                  {activeTxDropdown === 'type' && (
+                    <>
+                      <div className="fixed inset-0 z-40" onClick={() => setActiveTxDropdown(null)} />
+                      <div className="absolute left-0 mt-1.5 w-36 sm:w-40 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95 backdrop-blur-md divide-y divide-slate-800/30">
+                        {(['All', 'Income', 'Expense'] as const).map(type => (
+                          <div key={type} className="py-0.5 first:pt-0 last:pb-0">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setTxTypeFilter(type);
+                                setActiveTxDropdown(null);
+                              }}
+                              className={cn(
+                                "w-full text-left px-2.5 py-1.5 text-[10px] font-bold rounded-lg transition-colors uppercase truncate cursor-pointer",
+                                txTypeFilter === type ? "bg-teal-400 text-slate-950" : "text-slate-300 hover:bg-slate-800 hover:text-white"
+                              )}
+                            >
+                              {type === 'All' ? 'All Types' : type}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
                 </div>
-                <div className="relative w-full sm:w-44">
-                  <select 
-                    value={txAccFilter} 
-                    onChange={(e) => setTxAccFilter(e.target.value)} 
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-3 pr-8 py-2 text-[10px] font-extrabold text-slate-300 outline-none uppercase appearance-none cursor-pointer truncate hover:border-slate-700 focus:border-teal-400"
+
+                {/* 2. Accounts Dropdown */}
+                <div className="relative min-w-0 sm:w-44">
+                  <button
+                    type="button"
+                    onClick={() => setActiveTxDropdown(prev => prev === 'acc' ? null : 'acc')}
+                    className={cn(
+                      "w-full flex items-center justify-between gap-1 bg-slate-950 border rounded-lg px-2 sm:px-3 py-2 text-[10px] font-extrabold uppercase transition-colors outline-none cursor-pointer",
+                      txAccFilter !== 'All' ? "border-teal-400/50 text-teal-400" : "border-slate-800 text-slate-300 hover:border-slate-700"
+                    )}
                   >
-                    <option value="All">All Accounts</option>
-                    {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-                  </select>
-                  <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                    <span className="truncate">
+                      {txAccFilter === 'All' ? 'All Accounts' : (accounts.find(a => a.id === txAccFilter)?.name || 'All Accounts')}
+                    </span>
+                    <ChevronDown size={12} className={cn("text-slate-500 shrink-0 transition-transform duration-200", activeTxDropdown === 'acc' ? "rotate-180 text-teal-400" : "")} />
+                  </button>
+
+                  {activeTxDropdown === 'acc' && (
+                    <>
+                      <div className="fixed inset-0 z-40" onClick={() => setActiveTxDropdown(null)} />
+                      <div className="absolute left-0 mt-1.5 w-44 sm:w-52 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95 backdrop-blur-md divide-y divide-slate-800/30 max-h-60 overflow-y-auto custom-scrollbar">
+                        <div className="py-0.5 first:pt-0">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTxAccFilter('All');
+                              setActiveTxDropdown(null);
+                            }}
+                            className={cn(
+                              "w-full text-left px-2.5 py-1.5 text-[10px] font-bold rounded-lg transition-colors uppercase truncate cursor-pointer",
+                              txAccFilter === 'All' ? "bg-teal-400 text-slate-950" : "text-slate-300 hover:bg-slate-800 hover:text-white"
+                            )}
+                          >
+                            All Accounts
+                          </button>
+                        </div>
+                        {accounts.map(a => (
+                          <div key={a.id} className="py-0.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setTxAccFilter(a.id);
+                                setActiveTxDropdown(null);
+                              }}
+                              className={cn(
+                                "w-full text-left px-2.5 py-1.5 text-[10px] font-bold rounded-lg transition-colors uppercase truncate flex items-center justify-between gap-1 cursor-pointer",
+                                txAccFilter === a.id ? "bg-teal-400 text-slate-950" : "text-slate-300 hover:bg-slate-800 hover:text-white"
+                              )}
+                            >
+                              <span className="truncate">{a.name}</span>
+                              <span className="text-[8px] opacity-70 shrink-0">{a.currency}</span>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
                 </div>
-                <div className="relative w-full sm:w-44">
-                  <select 
-                    value={txCatFilter} 
-                    onChange={(e) => setTxCatFilter(e.target.value)} 
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-3 pr-8 py-2 text-[10px] font-extrabold text-slate-300 outline-none uppercase appearance-none cursor-pointer truncate hover:border-slate-700 focus:border-teal-400"
+
+                {/* 3. Categories Dropdown */}
+                <div className="relative min-w-0 sm:w-44">
+                  <button
+                    type="button"
+                    onClick={() => setActiveTxDropdown(prev => prev === 'cat' ? null : 'cat')}
+                    className={cn(
+                      "w-full flex items-center justify-between gap-1 bg-slate-950 border rounded-lg px-2 sm:px-3 py-2 text-[10px] font-extrabold uppercase transition-colors outline-none cursor-pointer",
+                      txCatFilter !== 'All' ? "border-teal-400/50 text-teal-400" : "border-slate-800 text-slate-300 hover:border-slate-700"
+                    )}
                   >
-                    <option value="All">All Categories</option>
-                    <option value="Initial Balance">Initial Balance</option>
-                    {Object.keys(INCOME_CATEGORIES).map(c => <option key={c} value={c}>{c}</option>)}
-                    {Object.keys(EXPENSE_CATEGORIES).map(c => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                  <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                    <span className="truncate">
+                      {txCatFilter === 'All' ? 'All Categories' : txCatFilter}
+                    </span>
+                    <ChevronDown size={12} className={cn("text-slate-500 shrink-0 transition-transform duration-200", activeTxDropdown === 'cat' ? "rotate-180 text-teal-400" : "")} />
+                  </button>
+
+                  {activeTxDropdown === 'cat' && (
+                    <>
+                      <div className="fixed inset-0 z-40" onClick={() => setActiveTxDropdown(null)} />
+                      <div className="absolute right-0 sm:left-0 mt-1.5 w-48 sm:w-56 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-1 animate-in fade-in zoom-in-95 backdrop-blur-md divide-y divide-slate-800/30 max-h-64 overflow-y-auto custom-scrollbar">
+                        <div className="py-0.5 first:pt-0">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTxCatFilter('All');
+                              setActiveTxDropdown(null);
+                            }}
+                            className={cn(
+                              "w-full text-left px-2.5 py-1.5 text-[10px] font-bold rounded-lg transition-colors uppercase truncate cursor-pointer",
+                              txCatFilter === 'All' ? "bg-teal-400 text-slate-950" : "text-slate-300 hover:bg-slate-800 hover:text-white"
+                            )}
+                          >
+                            All Categories
+                          </button>
+                        </div>
+                        <div className="py-0.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTxCatFilter('Initial Balance');
+                              setActiveTxDropdown(null);
+                            }}
+                            className={cn(
+                              "w-full text-left px-2.5 py-1.5 text-[10px] font-bold rounded-lg transition-colors uppercase truncate cursor-pointer",
+                              txCatFilter === 'Initial Balance' ? "bg-teal-400 text-slate-950" : "text-slate-300 hover:bg-slate-800 hover:text-white"
+                            )}
+                          >
+                            Initial Balance
+                          </button>
+                        </div>
+                        {Object.keys(INCOME_CATEGORIES).map(c => (
+                          <div key={c} className="py-0.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setTxCatFilter(c);
+                                setActiveTxDropdown(null);
+                              }}
+                              className={cn(
+                                "w-full text-left px-2.5 py-1.5 text-[10px] font-bold rounded-lg transition-colors uppercase truncate cursor-pointer",
+                                txCatFilter === c ? "bg-teal-400 text-slate-950" : "text-slate-300 hover:bg-slate-800 hover:text-white"
+                              )}
+                            >
+                              {c}
+                            </button>
+                          </div>
+                        ))}
+                        {Object.keys(EXPENSE_CATEGORIES).map(c => (
+                          <div key={c} className="py-0.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setTxCatFilter(c);
+                                setActiveTxDropdown(null);
+                              }}
+                              className={cn(
+                                "w-full text-left px-2.5 py-1.5 text-[10px] font-bold rounded-lg transition-colors uppercase truncate cursor-pointer",
+                                txCatFilter === c ? "bg-teal-400 text-slate-950" : "text-slate-300 hover:bg-slate-800 hover:text-white"
+                              )}
+                            >
+                              {c}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
             </div>

@@ -192,7 +192,7 @@ useEffect(() => {
   const [historyRange, setHistoryRange] = useState<'this' | 'fiscal' | 'custom'>('custom');
   const [historyCustomDates, setHistoryCustomDates] = useState(() => {
     return {
-      start: '2024-01-01',
+      start: '2023-01-01',
       end: getTodayStr(),
     };
   });
@@ -552,7 +552,7 @@ useEffect(() => {
   const handleRangeChange = (newRange: 'this' | 'fiscal' | 'custom') => {
     if (newRange === 'custom') {
       setHistoryCustomDates({
-        start: '2024-01-01',
+        start: '2023-01-01',
         end: getTodayStr(),
       });
     }

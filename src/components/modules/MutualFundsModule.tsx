@@ -2001,46 +2001,46 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
 
       <div className="flex flex-col border border-slate-800 rounded-xl overflow-hidden bg-slate-900/50 shadow-2xl shadow-slate-950/50">
         <div className="overflow-x-auto custom-scrollbar">
-          <div className="min-w-[900px] grid grid-cols-[48px_minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1.5fr)_minmax(0,1.2fr)_96px]">
+          <div className="min-w-[540px] sm:min-w-[720px] lg:min-w-[900px] grid grid-cols-[36px_minmax(110px,1.4fr)_minmax(72px,0.85fr)_minmax(85px,1fr)_minmax(95px,1.2fr)_minmax(85px,1.1fr)_64px] sm:grid-cols-[48px_minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1.5fr)_minmax(0,1.2fr)_96px]">
             {/* Header */}
-            <div className="flex items-center justify-center border-r border-b border-slate-800 bg-slate-900/80 py-3 sticky top-0 z-10 backdrop-blur-sm">
+            <div className="flex items-center justify-center border-r border-b border-slate-800 bg-slate-900/80 py-2 sm:py-3 sticky top-0 z-10 backdrop-blur-sm">
               <Checkbox 
                 checked={selectedIds.length === filtered.length && filtered.length > 0}
                 onChange={toggleSelectAll}
               />
             </div>
-            <div className="flex items-center gap-2 cursor-pointer group px-4 py-3 border-r border-b border-slate-800 bg-slate-900/80 sticky top-0 z-10 backdrop-blur-sm" onClick={() => handleSort('fundName')}>
-              {sortBy === 'fundName' ? (sortOrder === 'asc' ? <ArrowUp size={12} className="text-teal-400" /> : <ArrowDown size={12} className="text-teal-400" />) : <ArrowUpDown size={12} className="text-slate-600 group-hover:text-slate-400" />}
-              <span className={cn("text-label font-bold uppercase tracking-wider transition-colors", sortBy === 'fundName' ? "text-teal-400" : "text-slate-500 group-hover:text-slate-300")}>Mutual Fund</span>
+            <div className="flex items-center gap-1.5 sm:gap-2 cursor-pointer group px-2 sm:px-4 py-2 sm:py-3 border-r border-b border-slate-800 bg-slate-900/80 sticky top-0 z-10 backdrop-blur-sm" onClick={() => handleSort('fundName')}>
+              {sortBy === 'fundName' ? (sortOrder === 'asc' ? <ArrowUp size={12} className="text-teal-400 shrink-0" /> : <ArrowDown size={12} className="text-teal-400 shrink-0" />) : <ArrowUpDown size={12} className="text-slate-600 group-hover:text-slate-400 shrink-0" />}
+              <span className={cn("text-[9px] sm:text-label font-bold uppercase tracking-wider transition-colors truncate", sortBy === 'fundName' ? "text-teal-400" : "text-slate-500 group-hover:text-slate-300")}>Mutual Fund</span>
             </div>
-            <div className="flex items-center gap-2 cursor-pointer group px-4 py-3 border-r border-b border-slate-800 bg-slate-900/80 sticky top-0 z-10 backdrop-blur-sm" onClick={() => handleSort('date')}>
-              {sortBy === 'date' ? (sortOrder === 'asc' ? <ArrowUp size={12} className="text-teal-400" /> : <ArrowDown size={12} className="text-teal-400" />) : <ArrowUpDown size={12} className="text-slate-600 group-hover:text-slate-400" />}
-              <span className={cn("text-label font-bold uppercase tracking-wider transition-colors", sortBy === 'date' ? "text-teal-400" : "text-slate-500 group-hover:text-slate-300")}>Date</span>
+            <div className="flex items-center gap-1.5 sm:gap-2 cursor-pointer group px-2 sm:px-4 py-2 sm:py-3 border-r border-b border-slate-800 bg-slate-900/80 sticky top-0 z-10 backdrop-blur-sm" onClick={() => handleSort('date')}>
+              {sortBy === 'date' ? (sortOrder === 'asc' ? <ArrowUp size={12} className="text-teal-400 shrink-0" /> : <ArrowDown size={12} className="text-teal-400 shrink-0" />) : <ArrowUpDown size={12} className="text-slate-600 group-hover:text-slate-400 shrink-0" />}
+              <span className={cn("text-[9px] sm:text-label font-bold uppercase tracking-wider transition-colors truncate", sortBy === 'date' ? "text-teal-400" : "text-slate-500 group-hover:text-slate-300")}>Date</span>
             </div>
-            <div className="flex items-center gap-2 cursor-pointer group px-4 py-3 border-r border-b border-slate-800 bg-slate-900/80 sticky top-0 z-10 backdrop-blur-sm" onClick={() => handleSort('sipAmount')}>
-              {sortBy === 'sipAmount' ? (sortOrder === 'asc' ? <ArrowUp size={12} className="text-teal-400" /> : <ArrowDown size={12} className="text-teal-400" />) : <ArrowUpDown size={12} className="text-slate-600 group-hover:text-slate-400" />}
-              <span className={cn("text-label font-bold uppercase tracking-wider transition-colors", sortBy === 'sipAmount' ? "text-teal-400" : "text-slate-500 group-hover:text-slate-300")}>Addition</span>
+            <div className="flex items-center gap-1.5 sm:gap-2 cursor-pointer group px-2 sm:px-4 py-2 sm:py-3 border-r border-b border-slate-800 bg-slate-900/80 sticky top-0 z-10 backdrop-blur-sm" onClick={() => handleSort('sipAmount')}>
+              {sortBy === 'sipAmount' ? (sortOrder === 'asc' ? <ArrowUp size={12} className="text-teal-400 shrink-0" /> : <ArrowDown size={12} className="text-teal-400 shrink-0" />) : <ArrowUpDown size={12} className="text-slate-600 group-hover:text-slate-400 shrink-0" />}
+              <span className={cn("text-[9px] sm:text-label font-bold uppercase tracking-wider transition-colors truncate", sortBy === 'sipAmount' ? "text-teal-400" : "text-slate-500 group-hover:text-slate-300")}>Addition</span>
             </div>
-            <div className="flex items-center gap-2 cursor-pointer group px-4 py-3 border-r border-b border-slate-800 bg-slate-900/80 sticky top-0 z-10 backdrop-blur-sm" onClick={() => handleSort('units')}>
-              {sortBy === 'units' ? (sortOrder === 'asc' ? <ArrowUp size={12} className="text-teal-400" /> : <ArrowDown size={12} className="text-teal-400" />) : <ArrowUpDown size={12} className="text-slate-600 group-hover:text-slate-400" />}
-              <span className={cn("text-label font-bold uppercase tracking-wider transition-colors", sortBy === 'units' ? "text-teal-400" : "text-slate-500 group-hover:text-slate-300")}>Transaction</span>
+            <div className="flex items-center gap-1.5 sm:gap-2 cursor-pointer group px-2 sm:px-4 py-2 sm:py-3 border-r border-b border-slate-800 bg-slate-900/80 sticky top-0 z-10 backdrop-blur-sm" onClick={() => handleSort('units')}>
+              {sortBy === 'units' ? (sortOrder === 'asc' ? <ArrowUp size={12} className="text-teal-400 shrink-0" /> : <ArrowDown size={12} className="text-teal-400 shrink-0" />) : <ArrowUpDown size={12} className="text-slate-600 group-hover:text-slate-400 shrink-0" />}
+              <span className={cn("text-[9px] sm:text-label font-bold uppercase tracking-wider transition-colors truncate", sortBy === 'units' ? "text-teal-400" : "text-slate-500 group-hover:text-slate-300")}>Transaction</span>
             </div>
-            <div className="flex items-center gap-2 cursor-pointer group px-4 py-3 border-r border-b border-slate-800 bg-slate-900/80 sticky top-0 z-10 backdrop-blur-sm" onClick={() => handleSort('amount')}>
-              {sortBy === 'amount' ? (sortOrder === 'asc' ? <ArrowUp size={12} className="text-teal-400" /> : <ArrowDown size={12} className="text-teal-400" />) : <ArrowUpDown size={12} className="text-slate-600 group-hover:text-slate-400" />}
-              <span className={cn("text-label font-bold uppercase tracking-wider transition-colors", sortBy === 'amount' ? "text-teal-400" : "text-slate-500 group-hover:text-slate-300")}>Total Cost</span>
+            <div className="flex items-center gap-1.5 sm:gap-2 cursor-pointer group px-2 sm:px-4 py-2 sm:py-3 border-r border-b border-slate-800 bg-slate-900/80 sticky top-0 z-10 backdrop-blur-sm" onClick={() => handleSort('amount')}>
+              {sortBy === 'amount' ? (sortOrder === 'asc' ? <ArrowUp size={12} className="text-teal-400 shrink-0" /> : <ArrowDown size={12} className="text-teal-400 shrink-0" />) : <ArrowUpDown size={12} className="text-slate-600 group-hover:text-slate-400 shrink-0" />}
+              <span className={cn("text-[9px] sm:text-label font-bold uppercase tracking-wider transition-colors truncate", sortBy === 'amount' ? "text-teal-400" : "text-slate-500 group-hover:text-slate-300")}>Total Cost</span>
             </div>
             <div className="border-b border-slate-800 bg-slate-900/80 sticky top-0 z-10 backdrop-blur-sm" />
 
             {selectedIds.length > 0 && (
-              <div className="col-span-full flex items-center justify-between bg-rose-500/10 border-b border-rose-500/20 px-4 py-2 animate-in fade-in slide-in-from-top-2">
-                <span className="text-label font-bold text-rose-500 uppercase">
+              <div className="col-span-full flex items-center justify-between bg-rose-500/10 border-b border-rose-500/20 px-3 sm:px-4 py-2 animate-in fade-in slide-in-from-top-2">
+                <span className="text-[10px] sm:text-label font-bold text-rose-500 uppercase">
                   {selectedIds.length} Transactions Selected
                 </span>
                 <Button 
                   variant="danger" 
                   size="sm" 
                   onClick={handleBatchDelete}
-                  className="h-8 px-4 text-label font-bold uppercase"
+                  className="h-7 sm:h-8 px-2.5 sm:px-4 text-[10px] sm:text-label font-bold uppercase"
                 >
                   Delete Selected
                 </Button>
@@ -2050,7 +2050,7 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
             {filtered.map((t) => {
               const isSelected = selectedIds.includes(t.uniqueId);
               const cellBaseClass = cn(
-                "px-4 py-3 border-r border-b border-slate-800/50 transition-colors group-hover:bg-slate-800/40 flex flex-col justify-center",
+                "px-2 sm:px-4 py-2 sm:py-3 border-r border-b border-slate-800/50 transition-colors group-hover:bg-slate-800/40 flex flex-col justify-center",
                 isSelected ? "bg-teal-400/10" : "bg-slate-900/40"
               );
 
@@ -2064,17 +2064,17 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
                   </div>
                   
                   <div className={cellBaseClass}>
-                    <span className="text-body-sm font-bold text-white uppercase truncate mb-1">{t.fundName}</span>
+                    <span className="text-[11px] sm:text-body-sm font-bold text-white uppercase truncate mb-0.5 sm:mb-1">{t.fundName}</span>
                   </div>
 
                   <div className={cellBaseClass}>
-                    <span className="text-body-sm font-bold text-white uppercase tabular-nums mb-1">
+                    <span className="text-[11px] sm:text-body-sm font-bold text-white uppercase tabular-nums mb-0.5 sm:mb-1">
                       {new Date(t.date).toLocaleString('default', { month: 'short', year: 'numeric' }).toUpperCase()}
                     </span>
                   </div>
 
                   <div className={cellBaseClass}>
-                    <span className="text-body-sm font-bold text-white tabular-nums mb-1">{t.isWithdrawal ? '' : formatBDT(t.sipAmount)}</span>
+                    <span className="text-[11px] sm:text-body-sm font-bold text-white tabular-nums mb-0.5 sm:mb-1">{t.isWithdrawal ? '' : formatBDT(t.sipAmount)}</span>
                     <span className={cn(
                       "text-[7px] sm:text-label font-bold uppercase",
                       t.isDividend ? "text-blue-400" : (t.isWithdrawal ? "text-rose-400" : "text-teal-400")
@@ -2084,7 +2084,7 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
                   </div>
 
                   <div className={cellBaseClass}>
-                    <span className="text-body-sm font-bold text-white tabular-nums mb-1">
+                    <span className="text-[11px] sm:text-body-sm font-bold text-white tabular-nums mb-0.5 sm:mb-1">
                       {t.isWithdrawal ? 'WITHDRAWAL' : `${formatNumber(t.units)} x ${formatNumber(t.nav)}`}
                     </span>
                     <span className={cn(
@@ -2096,23 +2096,23 @@ export const MutualFundsModule: React.FC<MutualFundsModuleProps> = ({
                   </div>
 
                   <div className={cellBaseClass}>
-                    <span className="text-body-sm font-bold text-white tabular-nums mb-1">{formatBDT(t.amount)}</span>
+                    <span className="text-[11px] sm:text-body-sm font-bold text-white tabular-nums mb-0.5 sm:mb-1">{formatBDT(t.amount)}</span>
                   </div>
 
-                  <div className={cn("flex items-center gap-1 px-4 py-3 border-b border-slate-800/50 transition-colors group-hover:bg-slate-800/40", isSelected ? "bg-teal-400/10" : "bg-slate-900/40")}>
+                  <div className={cn("flex items-center gap-0.5 sm:gap-1 px-1.5 sm:px-4 py-2 sm:py-3 border-b border-slate-800/50 transition-colors group-hover:bg-slate-800/40", isSelected ? "bg-teal-400/10" : "bg-slate-900/40")}>
                     <button 
                       onClick={() => handleEditTransaction(t)}
-                      className="p-2 text-slate-500 hover:text-teal-400 hover:bg-teal-400/10 rounded-lg transition-all"
+                      className="p-1 sm:p-2 text-slate-500 hover:text-teal-400 hover:bg-teal-400/10 rounded-lg transition-all"
                       title="Edit Transaction"
                     >
-                      <Edit2 size={16} />
+                      <Edit2 size={14} className="sm:w-4 sm:h-4" />
                     </button>
                     <button 
                       onClick={() => handleDeleteTransaction(t.fundId, t.id)}
-                      className="p-2 text-slate-500 hover:text-rose-500 hover:bg-rose-500/10 rounded-lg transition-all"
+                      className="p-1 sm:p-2 text-slate-500 hover:text-rose-500 hover:bg-rose-500/10 rounded-lg transition-all"
                       title="Delete Transaction"
                     >
-                      <Trash2 size={16} />
+                      <Trash2 size={14} className="sm:w-4 sm:h-4" />
                     </button>
                   </div>
                 </React.Fragment>

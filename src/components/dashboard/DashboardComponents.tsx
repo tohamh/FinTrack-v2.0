@@ -936,8 +936,8 @@ export const DashboardCharts: React.FC<{
           </div>
         </div>
 
-                <div ref={accountsContainerRef} className="w-full relative z-10 flex-1 min-h-[300px]" style={{ minHeight: accountsChartHeight, height: '100%' }}>
-          <ResponsiveContainer width="100%" height="100%">
+        <div ref={accountsContainerRef} className="w-full relative z-10 flex-1" style={{ height: isMobile ? 260 : Math.max(accountsChartHeight, 300), minHeight: isMobile ? 260 : 300 }}>
+          <ResponsiveContainer width="100%" height={isMobile ? 260 : '100%'} minHeight={260}>
             <ComposedChart 
               data={displayAccountsData} 
               margin={accountsMargin}
@@ -1334,8 +1334,8 @@ export const DashboardCharts: React.FC<{
           </div>
         </div>
 
-        <div ref={investmentContainerRef} className="w-full relative z-10 flex-1 min-h-[300px]" style={{ minHeight: investmentChartHeight, height: '100%' }}>
-          <ResponsiveContainer width="100%" height="100%">
+        <div ref={investmentContainerRef} className="w-full relative z-10 flex-1" style={{ height: isMobile ? 260 : Math.max(investmentChartHeight, 300), minHeight: isMobile ? 260 : 300 }}>
+          <ResponsiveContainer width="100%" height={isMobile ? 260 : '100%'} minHeight={260}>
             <ComposedChart 
               data={chartData} 
               margin={investmentMargin}

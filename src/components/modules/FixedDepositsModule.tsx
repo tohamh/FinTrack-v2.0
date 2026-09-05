@@ -235,7 +235,7 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
   const [historyRange, setHistoryRange] = useState<'this' | 'fiscal' | 'custom'>('custom');
   const [historyCustomDates, setHistoryCustomDates] = useState(() => {
     return {
-      start: '2025-01-01',
+      start: '2022-01-01',
       end: getTodayStr(),
     };
   });
@@ -268,7 +268,7 @@ export const FixedDepositsModule: React.FC<FixedDepositsModuleProps> = ({
   const handleRangeChange = (newRange: 'this' | 'fiscal' | 'custom') => {
     if (newRange === 'custom') {
       setHistoryCustomDates({
-        start: '2025-01-01',
+        start: '2022-01-01',
         end: getTodayStr(),
       });
     }
